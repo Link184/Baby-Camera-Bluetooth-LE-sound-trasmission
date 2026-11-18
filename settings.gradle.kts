@@ -24,4 +24,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "BabyCamera"
 include(":app")
+include(":shared")
  
