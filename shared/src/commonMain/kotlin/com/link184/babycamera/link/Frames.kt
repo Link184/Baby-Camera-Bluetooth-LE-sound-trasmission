@@ -31,6 +31,9 @@ class Frame(val type: Byte, val payload: ByteArray) {
 
         /** Receiver's stream statistics as UTF-8 text, sent back to the stream sender. */
         const val STREAM_REPORT: Byte = 8
+
+        /** Real sound from the baby unit, see `AudioPacket`. */
+        const val AUDIO: Byte = 9
     }
 }
 

@@ -1,31 +1,31 @@
 package com.link184.babycamera
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
-import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import com.link184.babycamera.link.AndroidBleLink
 import com.link184.babycamera.link.requiredBlePermissions
 
 class MainActivity : ComponentActivity() {
 
-    private val link by lazy { AndroidBleLink(applicationContext) }
-
     private val requestPermissions =
-        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { /* the link re-checks on start */ }
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { /* checked again on start */ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        requestPermissions.launch(requiredBlePermissions())
-        setContent { App(link) }
-    }
-
-    override fun onDestroy() {
-        if (isFinishing) link.stop()
-        super.onDestroy()
+        requestPermissions.launch(
+            buildList {
+                addAll(requiredBlePermissions())
+                add(Manifest.permission.RECORD_AUDIO)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.POST_NOTIFICATIONS)
+            }.toTypedArray(),
+        )
+        // The monitor belongs to the app, not this screen: closing the screen doesn't stop it.
+        val controller = (application as BabyCameraApp).controller
+        setContent { App(controller) }
     }
 }
