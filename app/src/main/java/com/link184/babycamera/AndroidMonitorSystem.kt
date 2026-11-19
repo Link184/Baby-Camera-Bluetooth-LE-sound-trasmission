@@ -72,7 +72,8 @@ class AndroidMonitorSystem(private val context: Context) : MonitorSystem {
         post(
             CRYING_ID,
             NotificationCompat.Builder(context, CHANNEL_CRYING)
-                .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                .setSmallIcon(R.drawable.ic_stat_crying)
+                .setColor(context.getColor(R.color.notification_accent))
                 .setContentTitle("The baby is crying")
                 .setContentText("The sound stayed above your alert level")
                 .setCategory(NotificationCompat.CATEGORY_ALARM)
@@ -109,7 +110,8 @@ class AndroidMonitorSystem(private val context: Context) : MonitorSystem {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         return NotificationCompat.Builder(context, CHANNEL_RUNNING)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setSmallIcon(R.drawable.ic_stat_monitor)
+            .setColor(context.getColor(R.color.notification_accent))
             .setContentTitle(title)
             .setContentText(status)
             .setOngoing(true)

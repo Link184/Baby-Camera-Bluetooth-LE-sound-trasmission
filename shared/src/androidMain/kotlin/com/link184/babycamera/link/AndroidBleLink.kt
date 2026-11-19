@@ -206,7 +206,7 @@ class AndroidBleLink(context: Context) : PeerLink {
                         if (read < 0) break
                         eventChannel.send(PeerEvent.Data(peer, buffer.copyOf(read)))
                     }
-                } catch (e: IOException) {
+                } catch (_: IOException) {
                     // Reported below.
                 }
                 close()

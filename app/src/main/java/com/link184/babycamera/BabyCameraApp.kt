@@ -8,11 +8,13 @@ import com.link184.babycamera.link.AndroidBleLink
 import com.link184.babycamera.security.Pairings
 import com.link184.babycamera.security.SecureLink
 import com.link184.babycamera.security.androidNoiseCrypto
+import com.link184.babycamera.watch.WatchRelay
 import kotlinx.coroutines.MainScope
 
 /**
  * Owns the monitor for the whole process, so it keeps running after the screen is closed;
- * [MonitorService] keeps the process alive meanwhile.
+ * [MonitorService] keeps the process alive meanwhile. A paired watch running the BabyCamera
+ * watch app follows the parent unit through [WatchRelay].
  */
 class BabyCameraApp : Application() {
 
@@ -28,6 +30,6 @@ class BabyCameraApp : Application() {
             system = system,
             pairings = pairings,
             scope = scope,
-        )
+        ).also { WatchRelay(this, it, scope).start() }
     }
 }
