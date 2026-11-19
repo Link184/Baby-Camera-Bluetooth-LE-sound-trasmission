@@ -51,7 +51,8 @@ data class Session(val role: MonitorRole, val longRange: Boolean, val unitId: St
  * throughput test and a simulated audio stream on top of the same link.
  *
  * Meant to live as long as the app process, not a screen, so it keeps going in the background.
- * Must be used from the main thread.
+ * Must be used from the main thread. Everything it touches comes in through the constructor, so
+ * tests can run it with fakes and virtual time.
  */
 class MonitorController(
     val link: PeerLink,
@@ -59,6 +60,7 @@ class MonitorController(
     private val speaker: AudioOutput,
     private val system: MonitorSystem,
     private val scope: CoroutineScope,
+    timeSource: TimeSource = TimeSource.Monotonic,
 ) {
 
     val state: StateFlow<LinkState> = link.state
@@ -119,7 +121,7 @@ class MonitorController(
     var streamReport by mutableStateOf<String?>(null)
         private set
 
-    private val clock = TimeSource.Monotonic.markNow()
+    private val clock = timeSource.markNow()
 
     /** One per open connection, by [Peer.id]. */
     private val peers = LinkedHashMap<Int, PeerSession>()
@@ -439,56 +441,6 @@ class MonitorController(
         var bulkStartedNanos = 0L
     }
 
-    /**
-     * Receiver-side stats for a packet stream sent every [intervalMs]. A gap longer than
-     * [STALL_MS] between packets is what a listener would hear as a dropout.
-     */
-    private class StreamStats(private val intervalMs: Long) {
-        private var windowStart = 0L
-        private var lastArrival = 0L
-        private var lastSeq = -1
-        private var packets = 0
-        private var maxGapMs = 0L
-        private var stalls = 0
-        private var missing = 0
-
-        fun reset() {
-            windowStart = 0
-            lastArrival = 0
-            lastSeq = -1
-            stalls = 0
-            missing = 0
-        }
-
-        /** Returns a report line every [REPORT_EVERY_MS], otherwise null. */
-        fun onPacket(seq: Int, now: Long): String? {
-            if (lastSeq >= 0 && seq < lastSeq) reset() // the sender restarted its stream
-            if (windowStart == 0L) {
-                windowStart = now
-                packets = 0
-                maxGapMs = 0
-            } else {
-                val gapMs = (now - lastArrival) / 1_000_000
-                if (gapMs > maxGapMs) maxGapMs = gapMs
-                if (gapMs > STALL_MS) stalls++
-            }
-            if (lastSeq >= 0 && seq > lastSeq + 1) missing += seq - lastSeq - 1
-            lastSeq = seq
-            lastArrival = now
-            packets++
-
-            val windowMs = (now - windowStart) / 1_000_000
-            if (windowMs < REPORT_EVERY_MS) return null
-            val expected = windowMs / intervalMs
-            val report = "$packets/$expected packets in ${windowMs / 1000}s, longest gap $maxGapMs ms, " +
-                "dropouts (>$STALL_MS ms) $stalls, missing $missing"
-            windowStart = now
-            packets = 0
-            maxGapMs = 0
-            return report
-        }
-    }
-
     private companion object {
         const val DEFAULT_THRESHOLD = 0.6f
         const val KEY_OWN_UNIT = "own_unit_id"
@@ -508,8 +460,6 @@ class MonitorController(
         const val BULK_CHUNK_BYTES = 4 * 1024
         const val STREAM_PACKET_BYTES = 60
         const val STREAM_INTERVAL_MS = 20L
-        const val STALL_MS = 250L
-        const val REPORT_EVERY_MS = 5_000L
         const val MAX_LOG_LINES = 500
     }
 }

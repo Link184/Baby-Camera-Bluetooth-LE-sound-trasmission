@@ -10,6 +10,9 @@ kotlin {
         namespace = "com.link184.babycamera.shared"
         compileSdk = 37
         minSdk = 28
+
+        // Runs commonTest on this computer's JVM: ./gradlew :shared:testAndroidHostTest
+        withHostTest {}
     }
 
     listOf(
@@ -31,6 +34,10 @@ kotlin {
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kscan) // scans the baby unit's QR code
             implementation(libs.qrose) // draws it
+        }
+        commonTest.dependencies {
+            implementation(libs.kotlin.test)
+            implementation(libs.kotlinx.coroutines.test)
         }
     }
 }
