@@ -9,6 +9,9 @@ import com.link184.babycamera.security.NoiseCrypto
 import com.link184.babycamera.security.Pairings
 import com.link184.babycamera.security.SecretStore
 import com.link184.babycamera.security.SecureLink
+import com.link184.babycamera.watch.IosWatchBridge
+import com.link184.babycamera.watch.IosWatchLink
+import com.link184.babycamera.watch.WatchMirror
 import dev.whyoleg.cryptography.CryptographyProvider
 import dev.whyoleg.cryptography.providers.cryptokit.CryptoKit
 import kotlinx.coroutines.MainScope
@@ -25,9 +28,9 @@ import platform.darwin.dispatch_get_main_queue
 
 /**
  * Entry point called from Swift: hosts the shared Compose UI on top of the Swift Bluetooth bridge.
- * [secrets] is the Swift Keychain store.
+ * [secrets] is the Swift Keychain store, [watch] the Swift WatchConnectivity bridge to the Apple Watch app.
  */
-fun MainViewController(bridge: IosBleBridge, secrets: SecretStore): UIViewController {
+fun MainViewController(bridge: IosBleBridge, secrets: SecretStore, watch: IosWatchBridge): UIViewController {
     val scope = MainScope()
     val pairings = Pairings(secrets)
     val controller = MonitorController(
@@ -44,6 +47,7 @@ fun MainViewController(bridge: IosBleBridge, secrets: SecretStore): UIViewContro
         pairings = pairings,
         scope = scope,
     )
+    WatchMirror(controller, IosWatchLink(watch), scope).start()
     return ComposeUIViewController { App(controller, IosCameraPermission) }
 }
 
