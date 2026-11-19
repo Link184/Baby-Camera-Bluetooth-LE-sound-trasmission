@@ -1,6 +1,7 @@
 package com.link184.babycamera
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,6 +31,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -46,7 +49,8 @@ import com.link184.babycamera.link.LinkState
 @Composable
 fun App(controller: MonitorController) {
     var showLinkTest by remember { mutableStateOf(false) }
-    MaterialTheme {
+    // Follows the phone's dark mode setting, and switches live when it changes.
+    MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
         Surface(Modifier.fillMaxSize()) {
             Column(
                 Modifier.safeDrawingPadding().padding(16.dp),
