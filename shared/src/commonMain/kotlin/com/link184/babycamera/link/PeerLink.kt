@@ -3,7 +3,11 @@ package com.link184.babycamera.link
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
-/** GATT service the host advertises. Must match `babyCamServiceUUID` in the iOS Swift code. */
+/**
+ * GATT service holding [BLE_PSM_CHARACTERISTIC_UUID]. Must match `babyCamServiceUUID` in the iOS
+ * Swift code. Hosts don't advertise it: they advertise their own baby unit ID instead, so a parent
+ * unit only finds the baby unit it was paired with.
+ */
 const val BLE_SERVICE_UUID = "6B1E0001-3C4F-4D8E-9A57-B5C2A1D0E7F3"
 
 /**
@@ -70,7 +74,11 @@ interface PeerLink {
     /** Whether this phone lets the app ask for the long-range (LE Coded) radio mode. */
     val supportsLongRange: Boolean
 
-    fun start(role: Role, longRange: Boolean)
+    /**
+     * [unitId] is the baby unit's ID, a UUID: the host advertises it, the joiner looks for it.
+     * See [PairingCode].
+     */
+    fun start(role: Role, longRange: Boolean, unitId: String)
 
     /** Suspends while [peer]'s connection is congested, so callers can't queue unbounded data. */
     suspend fun send(peer: Peer, bytes: ByteArray)

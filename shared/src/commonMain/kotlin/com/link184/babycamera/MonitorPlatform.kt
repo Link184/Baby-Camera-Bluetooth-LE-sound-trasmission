@@ -43,4 +43,15 @@ interface MonitorSystem {
     fun loadThreshold(): Float?
 
     fun saveThreshold(value: Float)
+
+    fun loadText(key: String): String?
+
+    /** Null removes the setting. */
+    fun saveText(key: String, value: String?)
+}
+
+/** Asks for the camera, which only the parent unit needs, to scan the baby unit's QR code. */
+fun interface CameraPermission {
+    /** [onResult] is called on the main thread. */
+    fun request(onResult: (granted: Boolean) -> Unit)
 }

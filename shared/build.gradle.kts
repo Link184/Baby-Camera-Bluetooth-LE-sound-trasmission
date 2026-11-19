@@ -29,6 +29,8 @@ kotlin {
             implementation(libs.compose.ui)
             implementation(libs.compose.material3)
             implementation(libs.kotlinx.coroutines.core)
+            implementation(libs.kscan) // scans the baby unit's QR code
+            implementation(libs.qrose) // draws it
         }
     }
 }

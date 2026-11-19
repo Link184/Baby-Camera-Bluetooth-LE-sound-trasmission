@@ -22,8 +22,11 @@ import platform.posix.memcpy
  * with a new number for every connection.
  */
 interface IosBleBridge {
-    /** A host accepts up to [maxPeers] joiners at once. */
-    fun start(host: Boolean, maxPeers: Int, listener: IosBleListener)
+    /**
+     * A host advertises [unitId] (a UUID) and accepts up to [maxPeers] joiners at once; a joiner
+     * scans for [unitId].
+     */
+    fun start(host: Boolean, maxPeers: Int, unitId: String, listener: IosBleListener)
 
     /** Queues [data] for sending to [peer], in call order. */
     fun send(peer: Int, data: NSData)
@@ -118,11 +121,11 @@ class IosBleLink(private val bridge: IosBleBridge) : PeerLink {
         }
     }
 
-    override fun start(role: Role, longRange: Boolean) {
+    override fun start(role: Role, longRange: Boolean, unitId: String) {
         dropAllPeers()
         step = "Starting"
         publishState()
-        bridge.start(host = role == Role.Host, maxPeers = MAX_LISTENERS, listener = listener)
+        bridge.start(host = role == Role.Host, maxPeers = MAX_LISTENERS, unitId = unitId, listener = listener)
     }
 
     override suspend fun send(peer: Peer, bytes: ByteArray) {

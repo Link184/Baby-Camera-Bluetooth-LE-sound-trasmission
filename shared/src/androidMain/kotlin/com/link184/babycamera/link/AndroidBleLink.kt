@@ -67,8 +67,10 @@ fun requiredBlePermissions(): Array<String> =
  * connection-oriented channel, which carries the byte stream. L2CAP channels need Android 10.
  * The host keeps advertising and accepting channels until [MAX_LISTENERS] joiners are connected.
  *
- * No Bluetooth bonding is used, so the system never shows a pairing dialog. That also means the
- * link is unencrypted at the Bluetooth level; the real app must encrypt in the app.
+ * The L2CAP channels are secure: the first time two phones connect, both show the system pairing
+ * dialog with a 6-digit number to confirm (LE Secure Connections). After that they are bonded and
+ * reconnect without asking, and the link is encrypted by Bluetooth itself. A phone that was never
+ * paired can't open the channel without someone accepting it on the host.
  */
 @SuppressLint("MissingPermission") // checked in start()
 class AndroidBleLink(context: Context) : PeerLink {
@@ -102,7 +104,7 @@ class AndroidBleLink(context: Context) : PeerLink {
     override val supportsLongRange: Boolean =
         adapter?.isLeCodedPhySupported == true && adapter.isLeExtendedAdvertisingSupported
 
-    override fun start(role: Role, longRange: Boolean) {
+    override fun start(role: Role, longRange: Boolean, unitId: String) {
         handler.post {
             current?.close()
             current = null
@@ -128,7 +130,13 @@ class AndroidBleLink(context: Context) : PeerLink {
                     "extendedAdvertising=${bluetooth.isLeExtendedAdvertisingSupported} " +
                     "sdk=${Build.VERSION.SDK_INT} model=${Build.MODEL}",
             )
-            Run(bluetooth, role, longRange && supportsLongRange).also { current = it }.start()
+            val unitUuid = try {
+                ParcelUuid.fromString(unitId)
+            } catch (e: IllegalArgumentException) {
+                fail("Bad baby unit ID: $unitId")
+                return@post
+            }
+            Run(bluetooth, role, longRange && supportsLongRange, unitUuid).also { current = it }.start()
         }
     }
 
@@ -224,6 +232,8 @@ class AndroidBleLink(context: Context) : PeerLink {
         private val bluetooth: BluetoothAdapter,
         private val role: Role,
         private val coded: Boolean,
+        /** Advertised by the host and looked for by the joiner. */
+        private val unitUuid: ParcelUuid,
     ) {
         @Volatile
         private var gattServer: BluetoothGattServer? = null
@@ -267,7 +277,7 @@ class AndroidBleLink(context: Context) : PeerLink {
             hostStep = "Opening L2CAP channel"
             publishHostState()
             val server = try {
-                bluetooth.listenUsingInsecureL2capChannel()
+                bluetooth.listenUsingL2capChannel()
             } catch (e: IOException) {
                 return fail("Cannot open an L2CAP channel: ${e.message}")
             }
@@ -381,7 +391,7 @@ class AndroidBleLink(context: Context) : PeerLink {
             val advertiser = bluetooth.bluetoothLeAdvertiser
                 ?: return advertisingFailed("This phone cannot advertise over Bluetooth LE")
             val data = AdvertiseData.Builder()
-                .addServiceUuid(ParcelUuid.fromString(BLE_SERVICE_UUID))
+                .addServiceUuid(unitUuid)
                 .setIncludeDeviceName(false)
                 .build()
             if (coded) {
@@ -453,7 +463,7 @@ class AndroidBleLink(context: Context) : PeerLink {
 
         private fun startJoin() {
             val scanner = bluetooth.bluetoothLeScanner ?: return fail("This phone cannot scan over Bluetooth LE")
-            val filters = listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid.fromString(BLE_SERVICE_UUID)).build())
+            val filters = listOf(ScanFilter.Builder().setServiceUuid(unitUuid).build())
             val settings = ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .apply {
@@ -477,7 +487,7 @@ class AndroidBleLink(context: Context) : PeerLink {
             scanner.startScan(filters, settings, callback)
             log(if (coded) "Scanning (normal and long-range adverts)" else "Scanning")
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) log("Note: on Android 10/11, Location must be switched on for scanning")
-            _state.value = LinkState.Working("Scanning for a host")
+            _state.value = LinkState.Working("Looking for the baby unit")
         }
 
         private fun stopScan() {
@@ -570,7 +580,8 @@ class AndroidBleLink(context: Context) : PeerLink {
             val device = gatt?.device ?: return
             ioScope.launch {
                 try {
-                    val channel = device.createInsecureL2capChannel(psm)
+                    // Pairs first if needed; a slow confirmation can time this out, and the retry then works.
+                    val channel = device.createL2capChannel(psm)
                     pendingSocket = channel
                     channel.connect()
                     handler.post { onSocketConnected(channel) }
@@ -601,7 +612,10 @@ class AndroidBleLink(context: Context) : PeerLink {
             }
             val connection = Connection(Peer(nextPeerId.getAndIncrement(), address), socket)
             open[connection.peer.id] = connection
-            log("L2CAP channel open to $address (max packet ${socket.maxTransmitPacketSize} bytes, ${open.size} connected)")
+            log(
+                "Encrypted L2CAP channel open to $address (${bondName(socket.remoteDevice.bondState)}, " +
+                    "max packet ${socket.maxTransmitPacketSize} bytes, ${open.size} connected)",
+            )
             connection.open(::onConnectionClosed)
             when (role) {
                 Role.Join -> _state.value = LinkState.Connected(listOf(connection.peer))
@@ -649,6 +663,12 @@ class AndroidBleLink(context: Context) : PeerLink {
 
         /** Per-peer send queue; broadcast frames beyond it are dropped for that peer only. */
         const val OUTGOING_QUEUE_FRAMES = 16
+
+        fun bondName(state: Int) = when (state) {
+            BluetoothDevice.BOND_BONDED -> "paired"
+            BluetoothDevice.BOND_BONDING -> "pairing"
+            else -> "not paired"
+        }
 
         fun phyName(phy: Int) = when (phy) {
             BluetoothDevice.PHY_LE_1M -> "normal (1M)"

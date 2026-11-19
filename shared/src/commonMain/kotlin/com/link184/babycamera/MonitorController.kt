@@ -16,6 +16,7 @@ import com.link184.babycamera.audio.LoudnessDetector
 import com.link184.babycamera.link.Frame
 import com.link184.babycamera.link.FrameDecoder
 import com.link184.babycamera.link.LinkState
+import com.link184.babycamera.link.PairingCode
 import com.link184.babycamera.link.Peer
 import com.link184.babycamera.link.PeerEvent
 import com.link184.babycamera.link.PeerLink
@@ -36,8 +37,11 @@ import kotlinx.coroutines.yield
 import kotlin.math.roundToInt
 import kotlin.time.TimeSource
 
-/** What the user asked for; kept while the link drops so it can reconnect by itself. */
-data class Session(val role: MonitorRole, val longRange: Boolean)
+/**
+ * What the user asked for; kept while the link drops so it can reconnect by itself. [unitId] is
+ * the baby unit's ID: this phone's own on the baby unit, the scanned one on a parent unit.
+ */
+data class Session(val role: MonitorRole, val longRange: Boolean, val unitId: String)
 
 /**
  * Runs the baby monitor. The baby unit hosts the Bluetooth link and streams its microphone to
@@ -66,6 +70,18 @@ class MonitorController(
 
     /** Used by the next [start]; set on the link test screen. */
     var longRange by mutableStateOf(false)
+
+    /** This phone's ID as a baby unit, made the first time it's needed and kept from then on. */
+    val ownUnitId: String by lazy {
+        system.loadText(KEY_OWN_UNIT) ?: PairingCode.newUnitId().also { system.saveText(KEY_OWN_UNIT, it) }
+    }
+
+    /** What the baby unit shows as a QR code for parent units to scan. */
+    val pairingCode: String get() = PairingCode.format(ownUnitId)
+
+    /** The baby unit this phone listens to as a parent unit, from its QR code; null until scanned. */
+    var pairedUnitId by mutableStateOf(system.loadText(KEY_PAIRED_UNIT))
+        private set
 
     private val rttByPeer = mutableStateMapOf<Int, Double>()
     private val rssiByPeer = mutableStateMapOf<Int, Int>()
@@ -141,7 +157,7 @@ class MonitorController(
                     delay(RECONNECT_DELAY_MS)
                     if (session == wanted) {
                         log("Reconnecting...")
-                        link.start(wanted.role.linkRole, wanted.longRange)
+                        link.start(wanted.role.linkRole, wanted.longRange, wanted.unitId)
                     }
                 }
             }
@@ -150,6 +166,13 @@ class MonitorController(
 
     fun start(role: MonitorRole) {
         if (session != null) return
+        val unitId = when (role) {
+            MonitorRole.Baby -> ownUnitId
+            MonitorRole.Parent -> pairedUnitId ?: run {
+                startError = "Scan the baby unit's QR code first"
+                return
+            }
+        }
         logLines.clear()
         drops = 0
         audioReport = null
@@ -168,11 +191,21 @@ class MonitorController(
             log("FAILED: $audioError")
             return
         }
-        val wanted = Session(role, longRange && link.supportsLongRange)
+        val wanted = Session(role, longRange && link.supportsLongRange, unitId)
         session = wanted
         system.keepRunning(role)?.let { log("WARNING: may stop in the background: $it") }
         log("Started as the ${if (role == MonitorRole.Baby) "baby" else "parent"} unit")
-        link.start(role.linkRole, wanted.longRange)
+        link.start(role.linkRole, wanted.longRange, unitId)
+    }
+
+    /** Remembers the baby unit in a scanned QR code. Returns false if it isn't a BabyCamera code. */
+    fun pairWith(scanned: String): Boolean {
+        val unitId = PairingCode.parse(scanned) ?: return false
+        pairedUnitId = unitId
+        system.saveText(KEY_PAIRED_UNIT, unitId)
+        startError = null
+        log("Paired with baby unit ${PairingCode.shortName(unitId)}")
+        return true
     }
 
     fun stop() {
@@ -458,6 +491,8 @@ class MonitorController(
 
     private companion object {
         const val DEFAULT_THRESHOLD = 0.6f
+        const val KEY_OWN_UNIT = "own_unit_id"
+        const val KEY_PAIRED_UNIT = "paired_unit_id"
         const val RECONNECT_DELAY_MS = 2_000L
         const val PING_INTERVAL_MS = 1_000L
         const val CAPTURE_QUEUE_FRAMES = 25 // 1 s of sound

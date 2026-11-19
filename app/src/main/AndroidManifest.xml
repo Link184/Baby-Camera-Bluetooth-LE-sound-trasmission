@@ -5,6 +5,10 @@
     <uses-feature
         android:name="android.hardware.bluetooth_le"
         android:required="true" />
+    <!-- Only the parent unit scans a QR code, once; phones without a camera can still be baby units. -->
+    <uses-feature
+        android:name="android.hardware.camera.any"
+        android:required="false" />
 
     <!-- Android 11 and older -->
     <uses-permission
@@ -27,6 +31,7 @@
 
     <!-- Sound, alerts, and running in the background -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />

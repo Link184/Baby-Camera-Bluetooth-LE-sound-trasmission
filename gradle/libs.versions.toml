@@ -11,6 +11,8 @@ junitVersion = "1.3.0"
 espressoCore = "3.5.1"
 appcompat = "1.6.1"
 material = "1.10.0"
+kscan = "0.10.0"
+qrose = "1.3.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -24,6 +26,8 @@ compose-runtime = { group = "org.jetbrains.compose.runtime", name = "runtime", v
 compose-foundation = { group = "org.jetbrains.compose.foundation", name = "foundation", version.ref = "composeMultiplatform" }
 compose-ui = { group = "org.jetbrains.compose.ui", name = "ui", version.ref = "composeMultiplatform" }
 compose-material3 = { group = "org.jetbrains.compose.material3", name = "material3", version.ref = "composeMaterial3" }
+kscan = { group = "io.github.ismai117", name = "KScan", version.ref = "kscan" }
+qrose = { group = "io.github.alexzhirkevich", name = "qrose", version.ref = "qrose" }
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
 
 [plugins]

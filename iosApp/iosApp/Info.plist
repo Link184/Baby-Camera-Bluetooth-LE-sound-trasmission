@@ -6,6 +6,8 @@
     <true/>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>BabyCamera connects directly to the other phone over Bluetooth to carry the baby monitor sound.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>On the parent unit, BabyCamera scans the QR code shown on the baby unit, once, to find it.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>On the baby unit, BabyCamera listens to the baby and sends the sound to the parent's phone.</string>
     <key>UIBackgroundModes</key>

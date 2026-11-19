@@ -2,12 +2,16 @@ import CoreBluetooth
 import Foundation
 import Shared
 
-/// Must match `BLE_SERVICE_UUID` in the shared Kotlin code.
+/// GATT service holding the channel number. Must match `BLE_SERVICE_UUID` in the shared Kotlin code.
+/// Hosts advertise their baby unit ID instead, so parent units only find their own baby unit.
 let babyCamServiceUUID = CBUUID(string: "6B1E0001-3C4F-4D8E-9A57-B5C2A1D0E7F3")
 /// Readable characteristic holding the host's L2CAP channel number, 2 bytes little-endian.
 let psmCharacteristicUUID = CBUUID(string: CBUUIDL2CAPPSMCharacteristicString)
 
 /// Swift side of the shared `PeerLink`, over Core Bluetooth.
+///
+/// The L2CAP channel requires encryption, so the first connection between two phones goes through
+/// the system pairing dialog (confirm the 6-digit number on both), and later ones reuse the bond.
 ///
 /// Host: publishes an L2CAP channel, exposes its PSM in a GATT characteristic, and advertises
 /// until `maxPeers` joiners have opened a channel. Join: scans, connects, reads the PSM, and opens
@@ -32,6 +36,7 @@ final class BleBridge: NSObject, IosBleBridge {
     private var listener: IosBleListener?
     private var isHost = false
     private var maxPeers = 1
+    private var unitUUID = babyCamServiceUUID
     private var central: CBCentralManager?
     private var peripheralManager: CBPeripheralManager?
     private var peripheral: CBPeripheral?
@@ -40,9 +45,14 @@ final class BleBridge: NSObject, IosBleBridge {
     private var nextPeerId: Int32 = 1
     private var rssiTimer: Timer?
 
-    func start(host: Bool, maxPeers: Int32, listener: IosBleListener) {
+    func start(host: Bool, maxPeers: Int32, unitId: String, listener: IosBleListener) {
         stop()
+        guard let uuid = UUID(uuidString: unitId) else {
+            listener.onFailed(reason: "Bad baby unit ID: \(unitId)")
+            return
+        }
         self.listener = listener
+        unitUUID = CBUUID(nsuuid: uuid)
         isHost = host
         self.maxPeers = max(1, Int(maxPeers))
         listener.onWorking(step: "Waiting for Bluetooth")
@@ -147,7 +157,7 @@ final class BleBridge: NSObject, IosBleBridge {
             stream.schedule(in: .main, forMode: .common)
             stream.open()
         }
-        log("L2CAP channel open to \(name) (\(connections.count) connected)")
+        log("Encrypted L2CAP channel open to \(name) (\(connections.count) connected)")
         listener?.onPeerConnected(peer: connection.id, name: name)
         updateAdvertising()
     }
@@ -204,9 +214,9 @@ extension BleBridge: CBCentralManagerDelegate, CBPeripheralDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         if let reason = unusable(central.state) { return fail(reason) }
         guard central.state == .poweredOn else { return }
-        log("Scanning for the BabyCamera service")
-        listener?.onWorking(step: "Scanning for a host")
-        central.scanForPeripherals(withServices: [babyCamServiceUUID])
+        log("Scanning for baby unit \(unitUUID.uuidString)")
+        listener?.onWorking(step: "Looking for the baby unit")
+        central.scanForPeripherals(withServices: [unitUUID])
     }
 
     func centralManager(
@@ -288,7 +298,7 @@ extension BleBridge: CBPeripheralManagerDelegate {
                 peripheralManager.stopAdvertising()
             }
         } else if !peripheralManager.isAdvertising {
-            peripheralManager.startAdvertising([CBAdvertisementDataServiceUUIDsKey: [babyCamServiceUUID]])
+            peripheralManager.startAdvertising([CBAdvertisementDataServiceUUIDsKey: [unitUUID]])
         }
     }
 
@@ -296,7 +306,7 @@ extension BleBridge: CBPeripheralManagerDelegate {
         if let reason = unusable(peripheral.state) { return fail(reason) }
         guard peripheral.state == .poweredOn else { return }
         listener?.onWorking(step: "Opening L2CAP channel")
-        peripheral.publishL2CAPChannel(withEncryption: false)
+        peripheral.publishL2CAPChannel(withEncryption: true)
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didPublishL2CAPChannel PSM: CBL2CAPPSM, error: Error?) {
