@@ -84,10 +84,10 @@ interface PeerLink {
     suspend fun send(peer: Peer, bytes: ByteArray)
 
     /**
-     * Queues [bytes] for every connected peer without waiting. A peer whose connection is congested
-     * misses them, so one slow listener can't hold back the others.
+     * Queues [bytes] for [peer] without waiting. Returns false, dropping them, when its connection is
+     * congested, so one slow listener can't hold back the others.
      */
-    fun broadcast(bytes: ByteArray)
+    fun offer(peer: Peer, bytes: ByteArray): Boolean
 
     /** Drops the connection to [peer]. On a joiner that is the whole link, which then fails. */
     fun disconnect(peer: Peer)

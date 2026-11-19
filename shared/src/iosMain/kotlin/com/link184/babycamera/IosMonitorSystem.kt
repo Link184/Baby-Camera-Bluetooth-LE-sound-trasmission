@@ -74,12 +74,6 @@ class IosMonitorSystem : MonitorSystem {
         defaults.setFloat(value, forKey = KEY_THRESHOLD)
     }
 
-    override fun loadText(key: String): String? = defaults.stringForKey(key)
-
-    override fun saveText(key: String, value: String?) {
-        if (value == null) defaults.removeObjectForKey(key) else defaults.setObject(value, forKey = key)
-    }
-
     private companion object {
         const val ALERT_ID = "crying"
         const val KEY_THRESHOLD = "threshold"

@@ -54,6 +54,8 @@ import com.link184.babycamera.link.LinkState
 import com.link184.babycamera.link.MAX_LISTENERS
 import com.link184.babycamera.link.PairingCode
 import com.link184.babycamera.link.Peer
+import com.link184.babycamera.security.PairedParent
+import com.link184.babycamera.security.Pairings
 import io.github.alexzhirkevich.qrose.rememberQrCodePainter
 import org.ncgroup.kscan.BarcodeFormat
 import org.ncgroup.kscan.BarcodeResult
@@ -99,6 +101,9 @@ private fun ColumnScope.MonitorScreen(
 ) {
     val state by controller.state.collectAsState()
     var showQrCode by remember { mutableStateOf(false) }
+    var showParents by remember { mutableStateOf(false) }
+    val babyUnit by controller.pairings.babyUnit.collectAsState()
+    val parents by controller.pairings.parents.collectAsState()
     val running = controller.session
     val role = running?.role ?: chosenRole
 
@@ -124,17 +129,25 @@ private fun ColumnScope.MonitorScreen(
     }
 
     when (role) {
-        MonitorRole.Baby -> OutlinedButton(onClick = { showQrCode = true }, modifier = Modifier.fillMaxWidth()) {
-            Text("Add a parent unit")
+        MonitorRole.Baby -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { showQrCode = true }, modifier = Modifier.weight(1f)) { Text("Add a parent unit") }
+            OutlinedButton(onClick = { showParents = true }, modifier = Modifier.weight(1f)) {
+                Text("Paired (${parents.count { it.confirmed }})")
+            }
         }
-        MonitorRole.Parent -> PairedUnitLine(controller.pairedUnitId, enabled = running == null, onScan = onScan)
+        MonitorRole.Parent -> PairedUnitLine(babyUnit?.unitId, enabled = running == null, onScan = onScan)
     }
-    if (showQrCode) PairingQrDialog(controller.pairingCode, controller.ownUnitId, onDismiss = { showQrCode = false })
+    if (showQrCode) {
+        // A new key each time the dialog opens: one code per parent phone.
+        val code = remember { controller.newParentCode() }
+        PairingQrDialog(code, controller.pairings.ownUnitId, onDismiss = { showQrCode = false })
+    }
+    if (showParents) PairedParentsDialog(parents, onRemove = controller::removeParent, onDismiss = { showParents = false })
 
     if (running == null) {
         Button(
             onClick = { controller.start(chosenRole) },
-            enabled = chosenRole == MonitorRole.Baby || controller.pairedUnitId != null,
+            enabled = chosenRole == MonitorRole.Baby || babyUnit != null,
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text(if (chosenRole == MonitorRole.Baby) "Start listening to the baby" else "Start receiving")
@@ -217,9 +230,41 @@ private fun PairingQrDialog(code: String, unitId: String, onDismiss: () -> Unit)
                 }
                 Text("Baby unit ${PairingCode.shortName(unitId)}", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "On the parent phone, choose Parent and tap \"Scan the baby unit's QR code\". The first time " +
-                        "they connect, both phones ask to pair over Bluetooth: check that the 6-digit numbers " +
-                        "match, then accept on both.",
+                    "On the parent phone, choose Parent and tap \"Scan the baby unit's QR code\", then start both. " +
+                        "This code is for one phone and must be used within ${Pairings.PENDING_MS / 60_000} minutes; " +
+                        "for another phone, open this again for a new code. Don't share a photo of it: it holds " +
+                        "the key to listen.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+    )
+}
+
+/** On the baby unit: the parent units that may listen, each removable. */
+@Composable
+private fun PairedParentsDialog(parents: List<PairedParent>, onRemove: (String) -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+        title = { Text("Paired parent units") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (parents.isEmpty()) Text("None yet. Tap \"Add a parent unit\" to pair one.")
+                for (parent in parents) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(parent.name ?: "Code shown, not used yet", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                if (parent.confirmed) "Paired" else "Stops working if unused for ${Pairings.PENDING_MS / 60_000} minutes",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        TextButton(onClick = { onRemove(parent.id) }) { Text("Remove") }
+                    }
+                }
+                Text(
+                    "Removing a phone stops it listening at once. To use it again, pair it with a new code.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

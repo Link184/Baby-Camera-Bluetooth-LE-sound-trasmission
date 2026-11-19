@@ -10,6 +10,7 @@ import com.link184.babycamera.link.Role
 import com.link184.babycamera.link.getInt
 import com.link184.babycamera.link.putInt
 import com.link184.babycamera.link.putLong
+import com.link184.babycamera.security.Pairings
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -31,16 +32,20 @@ class MonitorControllerTest {
     private val parentB = Peer(2, "parent-b")
     private val babyUnit = Peer(7, "baby")
     private val someUnitId = "0f8fad5b-d9cb-469f-a165-70867728950e"
+    private val someCode = PairingCode.format(someUnitId, ByteArray(PairingCode.KEY_SIZE) { it.toByte() })
 
     /** One phone running the controller, with fakes around it, on the test's virtual clock. */
     private class Phone(
         scope: TestScope,
         val system: FakeSystem = FakeSystem(),
         val link: FakePeerLink = FakePeerLink(),
+        val secrets: FakeSecretStore = FakeSecretStore(),
     ) {
         val microphone = FakeMicrophone()
         val speaker = FakeSpeaker()
-        val controller = MonitorController(link, microphone, speaker, system, scope.backgroundScope, scope.testScheduler.timeSource)
+        val controller = MonitorController(
+            link, microphone, speaker, system, Pairings(secrets), scope.backgroundScope, scope.testScheduler.timeSource,
+        )
     }
 
     // ---- Baby unit ID and pairing ----
@@ -50,10 +55,10 @@ class MonitorControllerTest {
         val phone = Phone(this)
         phone.controller.start(MonitorRole.Baby)
 
-        val id = phone.controller.ownUnitId
+        val id = phone.controller.pairings.ownUnitId
         assertEquals(FakePeerLink.Start(Role.Host, false, id), phone.link.starts.single())
-        assertEquals(id, Phone(this, phone.system).controller.ownUnitId, "kept across restarts")
-        assertEquals(id, PairingCode.parse(phone.controller.pairingCode))
+        assertEquals(id, Phone(this, secrets = phone.secrets).controller.pairings.ownUnitId, "kept across restarts")
+        assertEquals(id, PairingCode.parse(phone.controller.newParentCode())?.unitId)
     }
 
     @Test
@@ -71,11 +76,11 @@ class MonitorControllerTest {
     fun parentUnitLooksForTheScannedBabyUnitAfterARestart() = runTest {
         val phone = Phone(this)
         assertFalse(phone.controller.pairWith("https://example.com"))
-        assertNull(phone.controller.pairedUnitId)
-        assertTrue(phone.controller.pairWith(PairingCode.format(someUnitId)))
+        assertNull(phone.controller.pairings.babyUnit.value)
+        assertTrue(phone.controller.pairWith(someCode))
 
-        val restarted = Phone(this, phone.system)
-        assertEquals(someUnitId, restarted.controller.pairedUnitId)
+        val restarted = Phone(this, secrets = phone.secrets)
+        assertEquals(someUnitId, restarted.controller.pairings.babyUnit.value?.unitId)
         restarted.controller.start(MonitorRole.Parent)
         assertEquals(FakePeerLink.Start(Role.Join, false, someUnitId), restarted.link.starts.single())
         assertTrue(restarted.speaker.running)
@@ -104,10 +109,26 @@ class MonitorControllerTest {
         phone.microphone.hear(tone(amplitude = 8_000))
         runCurrent()
 
-        val packet = AudioPacket.decode(phone.link.broadcasts(Frame.AUDIO).single().payload)
+        val packet = AudioPacket.decode(phone.link.offeredTo(parentA, Frame.AUDIO).single().payload)
         assertNotNull(packet)
         assertEquals(0, packet.seq)
+        assertTrue(phone.link.offeredTo(parentB, Frame.AUDIO).single().payload.contentEquals(phone.link.offeredTo(parentA, Frame.AUDIO).single().payload))
         assertNotNull(phone.controller.level)
+    }
+
+    @Test
+    fun aCongestedListenerMissesSoundWithoutHoldingBackTheOthers() = runTest {
+        val phone = startedBaby()
+        phone.link.join(parentA)
+        phone.link.join(parentB)
+        phone.link.congested += parentB
+        runCurrent()
+
+        repeat(3) { phone.microphone.hear(tone(amplitude = 8_000)) }
+        runCurrent()
+
+        assertEquals(3, phone.link.offeredTo(parentA, Frame.AUDIO).size)
+        assertTrue(phone.link.offeredTo(parentB, Frame.AUDIO).isEmpty())
     }
 
     @Test
@@ -116,7 +137,7 @@ class MonitorControllerTest {
         phone.microphone.hear(tone(amplitude = 8_000))
         runCurrent()
 
-        assertTrue(phone.link.broadcasts.isEmpty())
+        assertTrue(phone.link.offered.isEmpty())
         assertNotNull(phone.controller.level, "the meter still moves")
     }
 
@@ -140,7 +161,7 @@ class MonitorControllerTest {
         runCurrent()
 
         advanceTimeBy(1_001)
-        val ping = phone.link.broadcasts(Frame.PING).single()
+        val ping = phone.link.offeredTo(parentA, Frame.PING).single()
         advanceTimeBy(30)
         phone.link.receive(parentA, Frame(Frame.PONG, ping.payload))
         runCurrent()
@@ -337,13 +358,13 @@ class MonitorControllerTest {
 
         phone.controller.toggleStream()
         advanceTimeBy(1_000)
-        val packets = phone.link.broadcasts(Frame.STREAM)
+        val packets = phone.link.offeredTo(parentA, Frame.STREAM)
         assertEquals(50, packets.size, "one every 20 ms")
         assertEquals((0 until 50).toList(), packets.map { it.payload.getInt(0) })
 
         phone.controller.toggleStream()
         advanceTimeBy(1_000)
-        assertEquals(50, phone.link.broadcasts(Frame.STREAM).size)
+        assertEquals(50, phone.link.offeredTo(parentA, Frame.STREAM).size)
     }
 
     // ---- Helpers ----
@@ -354,7 +375,7 @@ class MonitorControllerTest {
     }
 
     private fun TestScope.startedParent(): Phone = Phone(this).apply {
-        controller.pairWith(PairingCode.format(someUnitId))
+        controller.pairWith(someCode)
         controller.start(MonitorRole.Parent)
         runCurrent()
     }

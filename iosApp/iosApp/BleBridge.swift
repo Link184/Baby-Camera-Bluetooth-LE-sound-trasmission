@@ -10,8 +10,7 @@ let psmCharacteristicUUID = CBUUID(string: CBUUIDL2CAPPSMCharacteristicString)
 
 /// Swift side of the shared `PeerLink`, over Core Bluetooth.
 ///
-/// The L2CAP channel requires encryption, so the first connection between two phones goes through
-/// the system pairing dialog (confirm the 6-digit number on both), and later ones reuse the bond.
+/// No Bluetooth pairing or encryption: `SecureLink` in the shared code encrypts everything on top.
 ///
 /// Host: publishes an L2CAP channel, exposes its PSM in a GATT characteristic, and advertises
 /// until `maxPeers` joiners have opened a channel. Join: scans, connects, reads the PSM, and opens
@@ -157,7 +156,7 @@ final class BleBridge: NSObject, IosBleBridge {
             stream.schedule(in: .main, forMode: .common)
             stream.open()
         }
-        log("Encrypted L2CAP channel open to \(name) (\(connections.count) connected)")
+        log("L2CAP channel open to \(name) (\(connections.count) connected)")
         listener?.onPeerConnected(peer: connection.id, name: name)
         updateAdvertising()
     }
@@ -306,7 +305,7 @@ extension BleBridge: CBPeripheralManagerDelegate {
         if let reason = unusable(peripheral.state) { return fail(reason) }
         guard peripheral.state == .poweredOn else { return }
         listener?.onWorking(step: "Opening L2CAP channel")
-        peripheral.publishL2CAPChannel(withEncryption: true)
+        peripheral.publishL2CAPChannel(withEncryption: false)
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didPublishL2CAPChannel PSM: CBL2CAPPSM, error: Error?) {

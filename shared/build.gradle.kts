@@ -34,6 +34,15 @@ kotlin {
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kscan) // scans the baby unit's QR code
             implementation(libs.qrose) // draws it
+            implementation(libs.cryptography.core) // the link encryption, see SecureLink
+        }
+        androidMain.dependencies {
+            implementation(libs.cryptography.provider.jdk)
+            // X25519 and ChaCha20-Poly1305 on every Android version, not only recent ones
+            implementation(libs.bouncycastle)
+        }
+        iosMain.dependencies {
+            implementation(libs.cryptography.provider.cryptokit)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)

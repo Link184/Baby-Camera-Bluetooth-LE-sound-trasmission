@@ -96,12 +96,6 @@ class AndroidMonitorSystem(private val context: Context) : MonitorSystem {
         prefs.edit { putFloat(KEY_THRESHOLD, value) }
     }
 
-    override fun loadText(key: String): String? = prefs.getString(key, null)
-
-    override fun saveText(key: String, value: String?) {
-        prefs.edit { if (value == null) remove(key) else putString(key, value) }
-    }
-
     fun runningNotification(): Notification {
         val title = when (role) {
             MonitorRole.Baby -> "Baby unit is listening"

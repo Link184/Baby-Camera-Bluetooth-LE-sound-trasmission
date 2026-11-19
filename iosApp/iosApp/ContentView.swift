@@ -6,7 +6,7 @@ struct ComposeView: UIViewControllerRepresentable {
     let bridge: BleBridge
 
     func makeUIViewController(context: Context) -> UIViewController {
-        MainViewControllerKt.MainViewController(bridge: bridge)
+        MainViewControllerKt.MainViewController(bridge: bridge, secrets: KeychainSecretStore())
     }
 
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}

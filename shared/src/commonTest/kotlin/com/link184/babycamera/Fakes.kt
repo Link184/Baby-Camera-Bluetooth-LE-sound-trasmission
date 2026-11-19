@@ -7,6 +7,7 @@ import com.link184.babycamera.link.Peer
 import com.link184.babycamera.link.PeerEvent
 import com.link184.babycamera.link.PeerLink
 import com.link184.babycamera.link.Role
+import com.link184.babycamera.security.SecretStore
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -31,7 +32,10 @@ class FakePeerLink(override val supportsLongRange: Boolean = false) : PeerLink {
     var stops = 0
     val disconnected = mutableListOf<Peer>()
     val sent = mutableListOf<Pair<Peer, Frame>>()
-    val broadcasts = mutableListOf<Frame>()
+    val offered = mutableListOf<Pair<Peer, Frame>>()
+
+    /** Peers whose connection is full: [offer] drops what's offered to them. */
+    val congested = mutableSetOf<Peer>()
 
     /** How long each [send] takes, like a link that is busy sending. */
     var sendDelayMs = 0L
@@ -40,7 +44,7 @@ class FakePeerLink(override val supportsLongRange: Boolean = false) : PeerLink {
 
     fun sentTo(peer: Peer, type: Byte): List<Frame> = sent.filter { it.first == peer && it.second.type == type }.map { it.second }
 
-    fun broadcasts(type: Byte): List<Frame> = broadcasts.filter { it.type == type }
+    fun offeredTo(peer: Peer, type: Byte): List<Frame> = offered.filter { it.first == peer && it.second.type == type }.map { it.second }
 
     override fun start(role: Role, longRange: Boolean, unitId: String) {
         starts += Start(role, longRange, unitId)
@@ -52,8 +56,10 @@ class FakePeerLink(override val supportsLongRange: Boolean = false) : PeerLink {
         if (peer in connected) sent += peer to bytes.toFrame()
     }
 
-    override fun broadcast(bytes: ByteArray) {
-        if (connected.isNotEmpty()) broadcasts += bytes.toFrame()
+    override fun offer(peer: Peer, bytes: ByteArray): Boolean {
+        if (peer !in connected || peer in congested) return false
+        offered += peer to bytes.toFrame()
+        return true
     }
 
     override fun disconnect(peer: Peer) {
@@ -130,9 +136,19 @@ class FakeSpeaker(var startError: String? = null) : AudioOutput {
     }
 }
 
-/** Settings live in [settings], so a second controller on the same instance sees what the first saved. */
+/** A second [Pairings][com.link184.babycamera.security.Pairings] on the same store sees what the first saved. */
+class FakeSecretStore : SecretStore {
+    val values = mutableMapOf<String, String>()
+
+    override fun read(name: String): String? = values[name]
+
+    override fun write(name: String, value: String?) {
+        if (value == null) values.remove(name) else values[name] = value
+    }
+}
+
+/** A second controller on the same instance sees the threshold the first saved. */
 class FakeSystem : MonitorSystem {
-    val settings = mutableMapOf<String, String>()
     var threshold: Float? = null
     var keptRunningAs: MonitorRole? = null
     val statuses = mutableListOf<String>()
@@ -162,11 +178,5 @@ class FakeSystem : MonitorSystem {
 
     override fun saveThreshold(value: Float) {
         threshold = value
-    }
-
-    override fun loadText(key: String): String? = settings[key]
-
-    override fun saveText(key: String, value: String?) {
-        if (value == null) settings.remove(key) else settings[key] = value
     }
 }

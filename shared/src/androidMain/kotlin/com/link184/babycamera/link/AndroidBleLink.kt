@@ -67,10 +67,8 @@ fun requiredBlePermissions(): Array<String> =
  * connection-oriented channel, which carries the byte stream. L2CAP channels need Android 10.
  * The host keeps advertising and accepting channels until [MAX_LISTENERS] joiners are connected.
  *
- * The L2CAP channels are secure: the first time two phones connect, both show the system pairing
- * dialog with a 6-digit number to confirm (LE Secure Connections). After that they are bonded and
- * reconnect without asking, and the link is encrypted by Bluetooth itself. A phone that was never
- * paired can't open the channel without someone accepting it on the host.
+ * No Bluetooth pairing is used, so the system never shows a pairing dialog, and the channel is
+ * unencrypted at the Bluetooth level. `SecureLink` encrypts and authenticates everything on top.
  */
 @SuppressLint("MissingPermission") // checked in start()
 class AndroidBleLink(context: Context) : PeerLink {
@@ -149,9 +147,8 @@ class AndroidBleLink(context: Context) : PeerLink {
         }
     }
 
-    override fun broadcast(bytes: ByteArray) {
-        for (connection in connections.values) connection.outgoing.trySend(bytes)
-    }
+    override fun offer(peer: Peer, bytes: ByteArray): Boolean =
+        connections[peer.id]?.outgoing?.trySend(bytes)?.isSuccess == true
 
     override fun disconnect(peer: Peer) {
         connections[peer.id]?.close()
@@ -277,7 +274,7 @@ class AndroidBleLink(context: Context) : PeerLink {
             hostStep = "Opening L2CAP channel"
             publishHostState()
             val server = try {
-                bluetooth.listenUsingL2capChannel()
+                bluetooth.listenUsingInsecureL2capChannel()
             } catch (e: IOException) {
                 return fail("Cannot open an L2CAP channel: ${e.message}")
             }
@@ -580,8 +577,7 @@ class AndroidBleLink(context: Context) : PeerLink {
             val device = gatt?.device ?: return
             ioScope.launch {
                 try {
-                    // Pairs first if needed; a slow confirmation can time this out, and the retry then works.
-                    val channel = device.createL2capChannel(psm)
+                    val channel = device.createInsecureL2capChannel(psm)
                     pendingSocket = channel
                     channel.connect()
                     handler.post { onSocketConnected(channel) }
@@ -612,10 +608,7 @@ class AndroidBleLink(context: Context) : PeerLink {
             }
             val connection = Connection(Peer(nextPeerId.getAndIncrement(), address), socket)
             open[connection.peer.id] = connection
-            log(
-                "Encrypted L2CAP channel open to $address (${bondName(socket.remoteDevice.bondState)}, " +
-                    "max packet ${socket.maxTransmitPacketSize} bytes, ${open.size} connected)",
-            )
+            log("L2CAP channel open to $address (max packet ${socket.maxTransmitPacketSize} bytes, ${open.size} connected)")
             connection.open(::onConnectionClosed)
             when (role) {
                 Role.Join -> _state.value = LinkState.Connected(listOf(connection.peer))
@@ -663,12 +656,6 @@ class AndroidBleLink(context: Context) : PeerLink {
 
         /** Per-peer send queue; broadcast frames beyond it are dropped for that peer only. */
         const val OUTGOING_QUEUE_FRAMES = 16
-
-        fun bondName(state: Int) = when (state) {
-            BluetoothDevice.BOND_BONDED -> "paired"
-            BluetoothDevice.BOND_BONDING -> "pairing"
-            else -> "not paired"
-        }
 
         fun phyName(phy: Int) = when (phy) {
             BluetoothDevice.PHY_LE_1M -> "normal (1M)"

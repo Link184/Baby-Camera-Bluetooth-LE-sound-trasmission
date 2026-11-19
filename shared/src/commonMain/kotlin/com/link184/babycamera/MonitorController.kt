@@ -25,6 +25,7 @@ import com.link184.babycamera.link.getInt
 import com.link184.babycamera.link.getLong
 import com.link184.babycamera.link.putInt
 import com.link184.babycamera.link.putLong
+import com.link184.babycamera.security.Pairings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
@@ -59,6 +60,8 @@ class MonitorController(
     private val microphone: AudioInput,
     private val speaker: AudioOutput,
     private val system: MonitorSystem,
+    /** Which baby unit and parent units belong together; the link's keys come from here too. */
+    val pairings: Pairings,
     private val scope: CoroutineScope,
     timeSource: TimeSource = TimeSource.Monotonic,
 ) {
@@ -72,18 +75,6 @@ class MonitorController(
 
     /** Used by the next [start]; set on the link test screen. */
     var longRange by mutableStateOf(false)
-
-    /** This phone's ID as a baby unit, made the first time it's needed and kept from then on. */
-    val ownUnitId: String by lazy {
-        system.loadText(KEY_OWN_UNIT) ?: PairingCode.newUnitId().also { system.saveText(KEY_OWN_UNIT, it) }
-    }
-
-    /** What the baby unit shows as a QR code for parent units to scan. */
-    val pairingCode: String get() = PairingCode.format(ownUnitId)
-
-    /** The baby unit this phone listens to as a parent unit, from its QR code; null until scanned. */
-    var pairedUnitId by mutableStateOf(system.loadText(KEY_PAIRED_UNIT))
-        private set
 
     private val rttByPeer = mutableStateMapOf<Int, Double>()
     private val rssiByPeer = mutableStateMapOf<Int, Int>()
@@ -144,8 +135,8 @@ class MonitorController(
             while (true) {
                 delay(PING_INTERVAL_MS)
                 if (link.state.value !is LinkState.Connected) continue
-                link.broadcast(Frame(Frame.PING, ByteArray(8).also { it.putLong(0, nowNanos()) }).encode())
-                link.rssi.value?.let { link.broadcast(Frame(Frame.RSSI, ByteArray(4).also { b -> b.putInt(0, it) }).encode()) }
+                broadcast(Frame(Frame.PING, ByteArray(8).also { it.putLong(0, nowNanos()) }))
+                link.rssi.value?.let { broadcast(Frame(Frame.RSSI, ByteArray(4).also { b -> b.putInt(0, it) })) }
             }
         }
         scope.launch {
@@ -169,8 +160,8 @@ class MonitorController(
     fun start(role: MonitorRole) {
         if (session != null) return
         val unitId = when (role) {
-            MonitorRole.Baby -> ownUnitId
-            MonitorRole.Parent -> pairedUnitId ?: run {
+            MonitorRole.Baby -> pairings.ownUnitId
+            MonitorRole.Parent -> pairings.babyUnit.value?.unitId ?: run {
                 startError = "Scan the baby unit's QR code first"
                 return
             }
@@ -200,14 +191,21 @@ class MonitorController(
         link.start(role.linkRole, wanted.longRange, unitId)
     }
 
-    /** Remembers the baby unit in a scanned QR code. Returns false if it isn't a BabyCamera code. */
+    /** Parent unit: remembers the baby unit and key in a scanned QR code. False if it isn't a BabyCamera code. */
     fun pairWith(scanned: String): Boolean {
-        val unitId = PairingCode.parse(scanned) ?: return false
-        pairedUnitId = unitId
-        system.saveText(KEY_PAIRED_UNIT, unitId)
+        if (!pairings.pairWith(scanned)) return false
         startError = null
-        log("Paired with baby unit ${PairingCode.shortName(unitId)}")
+        pairings.babyUnit.value?.let { log("Paired with baby unit ${PairingCode.shortName(it.unitId)}") }
         return true
+    }
+
+    /** Baby unit: a QR code with a new key, for one more parent unit. */
+    fun newParentCode(): String = pairings.newParentCode()
+
+    /** Baby unit: the parent unit's key stops working, and it is disconnected if connected. */
+    fun removeParent(id: String) {
+        pairings.removeParent(id)
+        log("Parent unit $id removed")
     }
 
     fun stop() {
@@ -265,7 +263,7 @@ class MonitorController(
             var next = nowNanos()
             while (true) {
                 val payload = ByteArray(STREAM_PACKET_BYTES).also { it.putInt(0, seq++) }
-                link.broadcast(Frame(Frame.STREAM, payload).encode())
+                broadcast(Frame(Frame.STREAM, payload))
                 next += STREAM_INTERVAL_MS * 1_000_000L
                 val wait = (next - nowNanos()) / 1_000_000
                 if (wait > 0) delay(wait) else yield()
@@ -291,10 +289,18 @@ class MonitorController(
             for (payload in captured) {
                 level = AudioPacket.levelOf(payload)
                 // Every packet decodes on its own, so a listener that misses some just hears a gap.
-                if (link.state.value is LinkState.Connected) link.broadcast(Frame(Frame.AUDIO, payload).encode())
+                broadcast(Frame(Frame.AUDIO, payload))
             }
         }
         return null
+    }
+
+    /** To every connected peer; a congested one misses it. */
+    private fun broadcast(frame: Frame) {
+        val peers = connectedPeers()
+        if (peers.isEmpty()) return
+        val bytes = frame.encode()
+        for (peer in peers) link.offer(peer, bytes)
     }
 
     private fun connectedPeers(): List<Peer> = (link.state.value as? LinkState.Connected)?.peers.orEmpty()
@@ -443,8 +449,6 @@ class MonitorController(
 
     private companion object {
         const val DEFAULT_THRESHOLD = 0.6f
-        const val KEY_OWN_UNIT = "own_unit_id"
-        const val KEY_PAIRED_UNIT = "paired_unit_id"
         const val RECONNECT_DELAY_MS = 2_000L
         const val PING_INTERVAL_MS = 1_000L
         const val CAPTURE_QUEUE_FRAMES = 25 // 1 s of sound

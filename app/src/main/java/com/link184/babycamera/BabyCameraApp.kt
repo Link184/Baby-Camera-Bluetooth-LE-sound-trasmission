@@ -1,9 +1,13 @@
 package com.link184.babycamera
 
 import android.app.Application
+import android.os.Build
 import com.link184.babycamera.audio.AndroidAudioInput
 import com.link184.babycamera.audio.AndroidAudioOutput
 import com.link184.babycamera.link.AndroidBleLink
+import com.link184.babycamera.security.Pairings
+import com.link184.babycamera.security.SecureLink
+import com.link184.babycamera.security.androidNoiseCrypto
 import kotlinx.coroutines.MainScope
 
 /**
@@ -15,12 +19,15 @@ class BabyCameraApp : Application() {
     val system by lazy { AndroidMonitorSystem(this) }
 
     val controller by lazy {
+        val scope = MainScope()
+        val pairings = Pairings(AndroidSecretStore(this))
         MonitorController(
-            link = AndroidBleLink(this),
+            link = SecureLink(AndroidBleLink(this), pairings, androidNoiseCrypto(), scope, deviceName = Build.MODEL),
             microphone = AndroidAudioInput(this),
             speaker = AndroidAudioOutput(),
             system = system,
-            scope = MainScope(),
+            pairings = pairings,
+            scope = scope,
         )
     }
 }

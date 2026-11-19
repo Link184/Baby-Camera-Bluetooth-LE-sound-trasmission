@@ -133,12 +133,10 @@ class IosBleLink(private val bridge: IosBleBridge) : PeerLink {
         if (peers[peer.id] == peer) bridge.send(peer.id, bytes.toNSData())
     }
 
-    override fun broadcast(bytes: ByteArray) {
-        if (peers.isEmpty()) return
-        val data = bytes.toNSData()
-        for (id in peers.keys) {
-            if (bridge.pendingBytes(id) <= MAX_PENDING_BYTES) bridge.send(id, data)
-        }
+    override fun offer(peer: Peer, bytes: ByteArray): Boolean {
+        if (peers[peer.id] != peer || bridge.pendingBytes(peer.id) > MAX_PENDING_BYTES) return false
+        bridge.send(peer.id, bytes.toNSData())
+        return true
     }
 
     override fun disconnect(peer: Peer) {
