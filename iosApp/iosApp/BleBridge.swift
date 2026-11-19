@@ -9,25 +9,42 @@ let psmCharacteristicUUID = CBUUID(string: CBUUIDL2CAPPSMCharacteristicString)
 
 /// Swift side of the shared `PeerLink`, over Core Bluetooth.
 ///
-/// Host: publishes an L2CAP channel, exposes its PSM in a GATT characteristic, and advertises.
-/// Join: scans, connects, reads the PSM, and opens the L2CAP channel. Everything runs on the
-/// main thread (Core Bluetooth queue `nil`, streams on the main run loop).
+/// Host: publishes an L2CAP channel, exposes its PSM in a GATT characteristic, and advertises
+/// until `maxPeers` joiners have opened a channel. Join: scans, connects, reads the PSM, and opens
+/// the L2CAP channel. Everything runs on the main thread (Core Bluetooth queue `nil`, streams on
+/// the main run loop).
 ///
 /// In an Android + iPhone pair the iPhone should join: Android phones usually can't see an
 /// iPhone that advertises from the background.
 final class BleBridge: NSObject, IosBleBridge {
+    /// One open L2CAP channel. `id` is new for every connection.
+    private final class Connection {
+        let id: Int32
+        let channel: CBL2CAPChannel
+        var outBuffer = Data()
+
+        init(id: Int32, channel: CBL2CAPChannel) {
+            self.id = id
+            self.channel = channel
+        }
+    }
+
     private var listener: IosBleListener?
+    private var isHost = false
+    private var maxPeers = 1
     private var central: CBCentralManager?
     private var peripheralManager: CBPeripheralManager?
     private var peripheral: CBPeripheral?
     private var publishedPSM: CBL2CAPPSM?
-    private var channel: CBL2CAPChannel?
-    private var outBuffer = Data()
+    private var connections: [Int32: Connection] = [:]
+    private var nextPeerId: Int32 = 1
     private var rssiTimer: Timer?
 
-    func start(host: Bool, listener: IosBleListener) {
+    func start(host: Bool, maxPeers: Int32, listener: IosBleListener) {
         stop()
         self.listener = listener
+        isHost = host
+        self.maxPeers = max(1, Int(maxPeers))
         listener.onWorking(step: "Waiting for Bluetooth")
         if host {
             peripheralManager = CBPeripheralManager(delegate: self, queue: nil)
@@ -36,19 +53,26 @@ final class BleBridge: NSObject, IosBleBridge {
         }
     }
 
-    func send(data: Data) {
-        outBuffer.append(data)
-        flush()
+    func send(peer: Int32, data: Data) {
+        guard let connection = connections[peer] else { return }
+        connection.outBuffer.append(data)
+        flush(connection)
     }
 
-    func pendingBytes() -> Int64 {
-        Int64(outBuffer.count)
+    func pendingBytes(peer: Int32) -> Int64 {
+        Int64(connections[peer]?.outBuffer.count ?? 0)
+    }
+
+    func disconnect(peer: Int32) {
+        guard let connection = connections[peer] else { return }
+        channelEnded(connection, reason: "Disconnected by the app")
     }
 
     func stop() {
         rssiTimer?.invalidate()
         rssiTimer = nil
-        closeChannel()
+        for connection in Array(connections.values) { closeStreams(connection) }
+        connections = [:]
         if let central {
             central.delegate = nil
             if central.state == .poweredOn {
@@ -68,7 +92,6 @@ final class BleBridge: NSObject, IosBleBridge {
         peripheralManager = nil
         peripheral = nil
         publishedPSM = nil
-        outBuffer = Data()
         listener = nil
     }
 
@@ -92,54 +115,85 @@ final class BleBridge: NSObject, IosBleBridge {
         }
     }
 
-    // MARK: Data channel
+    // MARK: Data channels
 
     private func openChannel(_ opened: CBL2CAPChannel?, _ error: Error?) {
         guard let opened, error == nil else {
-            fail("L2CAP channel failed: \(error?.localizedDescription ?? "unknown error")")
-            return
+            let reason = "L2CAP channel failed: \(error?.localizedDescription ?? "unknown error")"
+            // On a host, one joiner's failure must not cut off the others.
+            if isHost && !connections.isEmpty { return log(reason) }
+            return fail(reason)
         }
-        closeChannel()
-        channel = opened
+        let name = opened.peer.identifier.uuidString
+        if isHost {
+            // A phone that reconnects before its old channel timed out: the old one is dead.
+            for old in connections.values where old.channel.peer.identifier == opened.peer.identifier {
+                log("\(name) reconnected - closing its old channel")
+                closeStreams(old)
+                connections[old.id] = nil
+                listener?.onPeerDisconnected(peer: old.id)
+            }
+            if connections.count >= maxPeers {
+                opened.inputStream.close()
+                opened.outputStream.close()
+                return log("Refusing \(name): already \(maxPeers) listeners")
+            }
+        }
+        let connection = Connection(id: nextPeerId, channel: opened)
+        nextPeerId += 1
+        connections[connection.id] = connection
         for stream in [opened.inputStream as Stream, opened.outputStream as Stream] {
             stream.delegate = self
             stream.schedule(in: .main, forMode: .common)
             stream.open()
         }
-        peripheralManager?.stopAdvertising()
-        log("L2CAP channel open to \(opened.peer.identifier.uuidString)")
-        listener?.onConnected(peer: opened.peer.identifier.uuidString)
+        log("L2CAP channel open to \(name) (\(connections.count) connected)")
+        listener?.onPeerConnected(peer: connection.id, name: name)
+        updateAdvertising()
     }
 
-    private func closeChannel() {
-        guard let channel else { return }
-        for stream in [channel.inputStream as Stream, channel.outputStream as Stream] {
+    private func closeStreams(_ connection: Connection) {
+        for stream in [connection.channel.inputStream as Stream, connection.channel.outputStream as Stream] {
             stream.delegate = nil
             stream.close()
             stream.remove(from: .main, forMode: .common)
         }
-        self.channel = nil
     }
 
-    private func readAvailable() {
-        guard let input = channel?.inputStream else { return }
+    /// A channel closed or broke. A joiner has nothing left; a host keeps serving the others.
+    private func channelEnded(_ connection: Connection, reason: String) {
+        guard connections[connection.id] != nil else { return }
+        guard isHost else { return fail(reason) }
+        closeStreams(connection)
+        connections[connection.id] = nil
+        log("\(connection.channel.peer.identifier.uuidString) disconnected: \(reason) (\(connections.count) still connected)")
+        listener?.onPeerDisconnected(peer: connection.id)
+        updateAdvertising()
+    }
+
+    private func findConnection(for stream: Stream) -> Connection? {
+        connections.values.first { $0.channel.inputStream === stream || $0.channel.outputStream === stream }
+    }
+
+    private func readAvailable(_ connection: Connection) {
+        let input = connection.channel.inputStream!
         var buffer = [UInt8](repeating: 0, count: 4096)
         while input.hasBytesAvailable {
             let read = input.read(&buffer, maxLength: buffer.count)
             if read <= 0 { break }
-            listener?.onData(data: Data(buffer[0..<read]))
+            listener?.onData(peer: connection.id, data: Data(buffer[0..<read]))
         }
     }
 
-    private func flush() {
-        guard let output = channel?.outputStream else { return }
-        while output.hasSpaceAvailable && !outBuffer.isEmpty {
-            let count = outBuffer.count
-            let written = outBuffer.withUnsafeBytes { raw in
+    private func flush(_ connection: Connection) {
+        guard let output = connection.channel.outputStream else { return }
+        while output.hasSpaceAvailable && !connection.outBuffer.isEmpty {
+            let count = connection.outBuffer.count
+            let written = connection.outBuffer.withUnsafeBytes { raw in
                 output.write(raw.bindMemory(to: UInt8.self).baseAddress!, maxLength: count)
             }
             if written <= 0 { break }
-            outBuffer = outBuffer.subdata(in: written..<count)
+            connection.outBuffer = connection.outBuffer.subdata(in: written..<count)
         }
     }
 }
@@ -225,6 +279,19 @@ extension BleBridge: CBCentralManagerDelegate, CBPeripheralDelegate {
 // MARK: Host (peripheral)
 
 extension BleBridge: CBPeripheralManagerDelegate {
+    /// Advertises while there is room for another listener, and stops when full.
+    private func updateAdvertising() {
+        guard isHost, let peripheralManager, peripheralManager.state == .poweredOn, publishedPSM != nil else { return }
+        if connections.count >= maxPeers {
+            if peripheralManager.isAdvertising {
+                log("\(maxPeers) listeners connected - not accepting more")
+                peripheralManager.stopAdvertising()
+            }
+        } else if !peripheralManager.isAdvertising {
+            peripheralManager.startAdvertising([CBAdvertisementDataServiceUUIDsKey: [babyCamServiceUUID]])
+        }
+    }
+
     func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
         if let reason = unusable(peripheral.state) { return fail(reason) }
         guard peripheral.state == .poweredOn else { return }
@@ -247,11 +314,15 @@ extension BleBridge: CBPeripheralManagerDelegate {
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
         if let error { return fail("Adding the GATT service failed: \(error.localizedDescription)") }
-        peripheral.startAdvertising([CBAdvertisementDataServiceUUIDsKey: [babyCamServiceUUID]])
+        updateAdvertising()
     }
 
     func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
-        if let error { return fail("Advertising failed: \(error.localizedDescription)") }
+        if let error {
+            let reason = "Advertising failed: \(error.localizedDescription)"
+            // Listeners already connected keep listening.
+            return connections.isEmpty ? fail(reason) : log(reason)
+        }
         log("Advertising")
         listener?.onWorking(step: "Advertising - waiting for a joiner")
     }
@@ -265,11 +336,13 @@ extension BleBridge: CBPeripheralManagerDelegate {
 
 extension BleBridge: StreamDelegate {
     func stream(_ aStream: Stream, handle eventCode: Stream.Event) {
+        guard let connection = findConnection(for: aStream) else { return }
         switch eventCode {
-        case .hasBytesAvailable: readAvailable()
-        case .hasSpaceAvailable: flush()
-        case .errorOccurred: fail("Data channel error: \(aStream.streamError?.localizedDescription ?? "unknown")")
-        case .endEncountered: fail("Data channel closed")
+        case .hasBytesAvailable: readAvailable(connection)
+        case .hasSpaceAvailable: flush(connection)
+        case .errorOccurred:
+            channelEnded(connection, reason: "Data channel error: \(aStream.streamError?.localizedDescription ?? "unknown")")
+        case .endEncountered: channelEnded(connection, reason: "Data channel closed")
         default: break
         }
     }

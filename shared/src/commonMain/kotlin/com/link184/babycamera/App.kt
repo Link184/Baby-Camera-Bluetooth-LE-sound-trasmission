@@ -45,6 +45,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.link184.babycamera.link.LinkState
+import com.link184.babycamera.link.MAX_LISTENERS
+import com.link184.babycamera.link.Peer
 
 @Composable
 fun App(controller: MonitorController) {
@@ -102,6 +104,17 @@ private fun ColumnScope.MonitorScreen(controller: MonitorController, onLinkTest:
     } else {
         OutlinedButton(onClick = controller::stop, modifier = Modifier.fillMaxWidth()) { Text("Stop") }
         StatusLine(state, reconnecting = true)
+        if (role == MonitorRole.Baby) {
+            val listening = (state as? LinkState.Connected)?.peers?.size ?: 0
+            Text(
+                if (listening < MAX_LISTENERS) {
+                    "Parent units listening: $listening of $MAX_LISTENERS. More can join by starting as Parent."
+                } else {
+                    "Parent units listening: $listening of $MAX_LISTENERS (full)."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
         Text(
             "Keeps working with the screen off or another app open.",
             style = MaterialTheme.typography.bodySmall,
@@ -228,8 +241,9 @@ private fun ColumnScope.LinkTestScreen(controller: MonitorController, onBack: ()
         Text("Start the monitor on the main screen to test the link.", style = MaterialTheme.typography.bodyMedium)
     }
     StatusLine(state, reconnecting = running)
-    if (state is LinkState.Connected) {
-        Metrics(controller.rttMs, rssi, controller.peerRssi, controller.drops)
+    val connected = state as? LinkState.Connected
+    if (connected != null) {
+        Metrics(connected.peers, controller.rttMs, rssi, controller.peerRssi, controller.drops)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = controller::runBulkTest, enabled = !controller.bulkRunning) {
                 Text(if (controller.bulkRunning) "Measuring..." else "Throughput test")
@@ -253,7 +267,7 @@ private fun StatusLine(state: LinkState, reconnecting: Boolean) {
     val text = when (state) {
         LinkState.Idle -> "Idle"
         is LinkState.Working -> state.step
-        is LinkState.Connected -> "Connected to ${state.peer}"
+        is LinkState.Connected -> "Connected to ${state.peers.joinToString { it.name }}"
         is LinkState.Failed -> if (reconnecting) "Lost: ${state.reason} - retrying" else "Failed: ${state.reason}"
     }
     val color = when (state) {
@@ -264,14 +278,20 @@ private fun StatusLine(state: LinkState, reconnecting: Boolean) {
     Text(text, color = color, style = MaterialTheme.typography.bodyLarge)
 }
 
+/** One line per connected peer. [rssi] is this phone's own measurement, which only a joiner has. */
 @Composable
-private fun Metrics(rttMs: Double?, rssi: Int?, peerRssi: Int?, drops: Int) {
-    val parts = buildList {
-        rttMs?.let { add("round trip ${(it * 10).toLong() / 10.0} ms") }
-        (rssi ?: peerRssi)?.let { add("signal $it dBm") }
-        add("drops $drops")
+private fun Metrics(peers: List<Peer>, rttMs: Map<Int, Double>, rssi: Int?, peerRssi: Map<Int, Int>, drops: Int) {
+    for (peer in peers) {
+        val parts = buildList {
+            rttMs[peer.id]?.let { add("round trip ${(it * 10).toLong() / 10.0} ms") }
+            (rssi ?: peerRssi[peer.id])?.let { add("signal $it dBm") }
+        }
+        Text(
+            "${peer.name}: ${parts.joinToString("  -  ").ifEmpty { "measuring..." }}",
+            style = MaterialTheme.typography.bodyMedium,
+        )
     }
-    Text(parts.joinToString("  -  "), style = MaterialTheme.typography.bodyMedium)
+    Text("Drops so far: $drops", style = MaterialTheme.typography.bodyMedium)
 }
 
 @Composable

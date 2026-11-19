@@ -32,23 +32,22 @@ import android.os.HandlerThread
 import android.os.ParcelUuid
 import android.util.Log
 import androidx.annotation.RequiresApi
-import java.io.IOException
-import java.io.OutputStream
-import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ClosedSendChannelException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
+import java.io.IOException
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Runtime permissions the BLE link needs on this Android version. */
 fun requiredBlePermissions(): Array<String> =
@@ -66,6 +65,7 @@ fun requiredBlePermissions(): Array<String> =
  * [PeerLink] over Bluetooth LE: the host runs a GATT server that publishes its L2CAP channel
  * number (PSM) and advertises; the joiner scans, reads the PSM over GATT, then opens an L2CAP
  * connection-oriented channel, which carries the byte stream. L2CAP channels need Android 10.
+ * The host keeps advertising and accepting channels until [MAX_LISTENERS] joiners are connected.
  *
  * No Bluetooth bonding is used, so the system never shows a pairing dialog. That also means the
  * link is unencrypted at the Bluetooth level; the real app must encrypt in the app.
@@ -87,16 +87,16 @@ class AndroidBleLink(context: Context) : PeerLink {
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
     private val _rssi = MutableStateFlow<Int?>(null)
-    private val incomingChannel = Channel<ByteArray>(Channel.BUFFERED)
-    private val writeMutex = Mutex()
+    private val eventChannel = Channel<PeerEvent>(Channel.BUFFERED)
 
-    @Volatile
-    private var output: OutputStream? = null
+    /** Open channels, by peer id, for sending from any thread. */
+    private val connections = ConcurrentHashMap<Int, Connection>()
+    private val nextPeerId = AtomicInteger(1)
     private var current: Run? = null
 
     override val state: StateFlow<LinkState> = _state
     override val log: Flow<String> = _log
-    override val incoming: Flow<ByteArray> = incomingChannel.receiveAsFlow()
+    override val events: Flow<PeerEvent> = eventChannel.receiveAsFlow()
     override val rssi: StateFlow<Int?> = _rssi
 
     override val supportsLongRange: Boolean =
@@ -132,18 +132,21 @@ class AndroidBleLink(context: Context) : PeerLink {
         }
     }
 
-    override suspend fun send(bytes: ByteArray) {
-        val out = output ?: return
-        withContext(Dispatchers.IO) {
-            writeMutex.withLock {
-                try {
-                    out.write(bytes)
-                    out.flush()
-                } catch (e: IOException) {
-                    // The reader loop notices the broken channel and reports it.
-                }
-            }
+    override suspend fun send(peer: Peer, bytes: ByteArray) {
+        val connection = connections[peer.id] ?: return
+        try {
+            connection.outgoing.send(bytes)
+        } catch (e: ClosedSendChannelException) {
+            // Closed meanwhile; its Left event tells the caller.
         }
+    }
+
+    override fun broadcast(bytes: ByteArray) {
+        for (connection in connections.values) connection.outgoing.trySend(bytes)
+    }
+
+    override fun disconnect(peer: Peer) {
+        connections[peer.id]?.close()
     }
 
     override fun stop() {
@@ -166,6 +169,55 @@ class AndroidBleLink(context: Context) : PeerLink {
         _state.value = LinkState.Failed(reason)
     }
 
+    /**
+     * One L2CAP channel to a peer. Its own reader emits the peer's [PeerEvent]s in order, and its
+     * own writer drains [outgoing], so a congested peer only holds up itself.
+     */
+    private inner class Connection(val peer: Peer, private val socket: BluetoothSocket) {
+        val outgoing = Channel<ByteArray>(OUTGOING_QUEUE_FRAMES)
+        val address: String = socket.remoteDevice.address
+
+        /** [onClosed] runs on the handler thread once the channel is gone, whoever closed it. */
+        fun open(onClosed: (Connection) -> Unit) {
+            connections[peer.id] = this
+            ioScope.launch {
+                try {
+                    val output = socket.outputStream
+                    for (bytes in outgoing) {
+                        output.write(bytes)
+                        output.flush()
+                    }
+                } catch (e: IOException) {
+                    close() // the reader then reports it
+                }
+            }
+            ioScope.launch {
+                eventChannel.send(PeerEvent.Joined(peer))
+                val buffer = ByteArray(16 * 1024)
+                try {
+                    val input = socket.inputStream
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        eventChannel.send(PeerEvent.Data(peer, buffer.copyOf(read)))
+                    }
+                } catch (e: IOException) {
+                    // Reported below.
+                }
+                close()
+                eventChannel.send(PeerEvent.Left(peer))
+                handler.post { onClosed(this@Connection) }
+            }
+        }
+
+        /** Safe from any thread, any number of times. */
+        fun close() {
+            connections.remove(peer.id, this)
+            outgoing.close()
+            runCatching { socket.close() }
+        }
+    }
+
     /** One start()..stop() attempt. Callbacks from a superseded run are ignored via [active]. */
     @RequiresApi(Build.VERSION_CODES.Q)
     private inner class Run(
@@ -182,10 +234,19 @@ class AndroidBleLink(context: Context) : PeerLink {
         private var gatt: BluetoothGatt? = null
         private var psmReceived = false
 
+        /** The joiner's channel while it is being opened. */
         @Volatile
-        private var socket: BluetoothSocket? = null
+        private var pendingSocket: BluetoothSocket? = null
+
+        /** This run's open channels: up to [MAX_LISTENERS] on the host, one on the joiner. */
+        private val open = LinkedHashMap<Int, Connection>()
+
+        /** What the host shows while nobody is connected. */
+        private var hostStep = "Starting"
 
         private val active get() = current === this
+
+        private val advertising get() = advertiseCallback != null || advertisingSetCallback != null
 
         private val rssiPoll = object : Runnable {
             override fun run() {
@@ -203,7 +264,8 @@ class AndroidBleLink(context: Context) : PeerLink {
         // ---- Host: GATT server + L2CAP listener + advertising ----
 
         private fun startHost() {
-            _state.value = LinkState.Working("Opening L2CAP channel")
+            hostStep = "Opening L2CAP channel"
+            publishHostState()
             val server = try {
                 bluetooth.listenUsingInsecureL2capChannel()
             } catch (e: IOException) {
@@ -243,7 +305,10 @@ class AndroidBleLink(context: Context) : PeerLink {
                         )
                     }
                     handler.post {
-                        if (active) log("GATT ${device.address} ${if (connected) "connected" else "disconnected"} (status $status)")
+                        if (!active) return@post
+                        log("GATT ${device.address} ${if (connected) "connected" else "disconnected"} (status $status)")
+                        // Many Bluetooth chips stop advertising once someone connects.
+                        if (connected) keepAdvertising(restart = true)
                     }
                 }
 
@@ -263,7 +328,9 @@ class AndroidBleLink(context: Context) : PeerLink {
                 }
 
                 override fun onPhyUpdate(device: BluetoothDevice, txPhy: Int, rxPhy: Int, status: Int) {
-                    handler.post { if (active) log("Radio mode now: send=${phyName(txPhy)} receive=${phyName(rxPhy)} (status $status)") }
+                    handler.post {
+                        if (active) log("Radio mode to ${device.address}: send=${phyName(txPhy)} receive=${phyName(rxPhy)} (status $status)")
+                    }
                 }
             }
             val opened = bluetoothManager?.openGattServer(appContext, callback)
@@ -273,17 +340,46 @@ class AndroidBleLink(context: Context) : PeerLink {
 
             ioScope.launch {
                 try {
-                    val accepted = server.accept()
-                    handler.post { onSocketConnected(accepted) }
+                    while (true) {
+                        val accepted = server.accept()
+                        handler.post { onSocketConnected(accepted) }
+                    }
                 } catch (e: IOException) {
                     // Closed by close(); nothing to report.
                 }
             }
         }
 
+        private fun publishHostState() {
+            _state.value = if (open.isEmpty()) {
+                LinkState.Working(hostStep)
+            } else {
+                LinkState.Connected(open.values.map { it.peer })
+            }
+        }
+
+        /** Advertises while there is room for another listener, and stops when full. */
+        private fun keepAdvertising(restart: Boolean) {
+            if (open.size >= MAX_LISTENERS) {
+                if (advertising) {
+                    log("$MAX_LISTENERS listeners connected - not accepting more")
+                    stopAdvertising()
+                }
+                return
+            }
+            if (advertising && !restart) return
+            stopAdvertising()
+            startAdvertising()
+        }
+
+        /** Advertising problems only end the run while nobody is listening yet. */
+        private fun advertisingFailed(reason: String) {
+            if (open.isEmpty()) fail(reason) else log("Cannot advertise for more listeners: $reason")
+        }
+
         private fun startAdvertising() {
             val advertiser = bluetooth.bluetoothLeAdvertiser
-                ?: return fail("This phone cannot advertise over Bluetooth LE")
+                ?: return advertisingFailed("This phone cannot advertise over Bluetooth LE")
             val data = AdvertiseData.Builder()
                 .addServiceUuid(ParcelUuid.fromString(BLE_SERVICE_UUID))
                 .setIncludeDeviceName(false)
@@ -301,12 +397,14 @@ class AndroidBleLink(context: Context) : PeerLink {
                 val callback = object : AdvertisingSetCallback() {
                     override fun onAdvertisingSetStarted(set: AdvertisingSet?, txPower: Int, status: Int) {
                         handler.post {
-                            if (!active) return@post
+                            if (!active || advertisingSetCallback !== this) return@post
                             if (status == ADVERTISE_SUCCESS) {
                                 log("Advertising in long-range mode (tx power $txPower dBm)")
-                                _state.value = LinkState.Working("Advertising (long range) - waiting for a joiner")
+                                hostStep = "Advertising (long range) - waiting for a joiner"
+                                publishHostState()
                             } else {
-                                fail("Long-range advertising failed (status $status)")
+                                advertisingSetCallback = null
+                                advertisingFailed("Long-range advertising failed (status $status)")
                             }
                         }
                     }
@@ -323,14 +421,19 @@ class AndroidBleLink(context: Context) : PeerLink {
                 val callback = object : AdvertiseCallback() {
                     override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
                         handler.post {
-                            if (!active) return@post
+                            if (!active || advertiseCallback !== this) return@post
                             log("Advertising")
-                            _state.value = LinkState.Working("Advertising - waiting for a joiner")
+                            hostStep = "Advertising - waiting for a joiner"
+                            publishHostState()
                         }
                     }
 
                     override fun onStartFailure(errorCode: Int) {
-                        handler.post { if (active) fail("Advertising failed (error $errorCode)") }
+                        handler.post {
+                            if (!active || advertiseCallback !== this) return@post
+                            advertiseCallback = null
+                            advertisingFailed("Advertising failed (error $errorCode)")
+                        }
                     }
                 }
                 advertiseCallback = callback
@@ -468,7 +571,7 @@ class AndroidBleLink(context: Context) : PeerLink {
             ioScope.launch {
                 try {
                     val channel = device.createInsecureL2capChannel(psm)
-                    socket = channel
+                    pendingSocket = channel
                     channel.connect()
                     handler.post { onSocketConnected(channel) }
                 } catch (e: IOException) {
@@ -479,36 +582,55 @@ class AndroidBleLink(context: Context) : PeerLink {
 
         // ---- Both roles ----
 
-        private fun onSocketConnected(connected: BluetoothSocket) {
-            if (!active) return runCatching { connected.close() }.let { }
-            socket = connected
-            if (role == Role.Host) stopAdvertising()
-            output = connected.outputStream
-            val peer = connected.remoteDevice.address
-            log("L2CAP channel open to $peer (max packet ${connected.maxTransmitPacketSize} bytes)")
-            _state.value = LinkState.Connected(peer)
-            ioScope.launch {
-                val buffer = ByteArray(16 * 1024)
-                try {
-                    val input = connected.inputStream
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        incomingChannel.send(buffer.copyOf(read))
-                    }
-                } catch (e: IOException) {
-                    // Reported below.
+        private fun onSocketConnected(socket: BluetoothSocket) {
+            pendingSocket = null
+            if (!active) return runCatching { socket.close() }.let { }
+            val address = socket.remoteDevice.address
+            if (role == Role.Host) {
+                // A phone that reconnects before its old channel timed out: the old one is dead.
+                open.values.filter { it.address == address }.forEach {
+                    log("$address reconnected - closing its old channel")
+                    open.remove(it.peer.id)
+                    it.close()
                 }
-                handler.post { if (active) fail("Data channel closed") }
+                if (open.size >= MAX_LISTENERS) {
+                    log("Refusing $address: already $MAX_LISTENERS listeners")
+                    runCatching { socket.close() }
+                    return
+                }
+            }
+            val connection = Connection(Peer(nextPeerId.getAndIncrement(), address), socket)
+            open[connection.peer.id] = connection
+            log("L2CAP channel open to $address (max packet ${socket.maxTransmitPacketSize} bytes, ${open.size} connected)")
+            connection.open(::onConnectionClosed)
+            when (role) {
+                Role.Join -> _state.value = LinkState.Connected(listOf(connection.peer))
+                Role.Host -> {
+                    publishHostState()
+                    keepAdvertising(restart = true)
+                }
+            }
+        }
+
+        private fun onConnectionClosed(connection: Connection) {
+            if (!active || open.remove(connection.peer.id) == null) return
+            when (role) {
+                Role.Join -> fail("Data channel closed")
+                Role.Host -> {
+                    log("${connection.address} disconnected (${open.size} still connected)")
+                    publishHostState()
+                    keepAdvertising(restart = false)
+                }
             }
         }
 
         fun close() {
             handler.removeCallbacks(rssiPoll)
-            output = null
             stopScan()
             stopAdvertising()
-            runCatching { socket?.close() }
+            open.values.forEach { it.close() }
+            open.clear()
+            runCatching { pendingSocket?.close() }
             runCatching { serverSocket?.close() }
             gatt?.let {
                 runCatching { it.disconnect() }
@@ -524,6 +646,9 @@ class AndroidBleLink(context: Context) : PeerLink {
 
     private companion object {
         const val TAG = "BabyCamBle"
+
+        /** Per-peer send queue; broadcast frames beyond it are dropped for that peer only. */
+        const val OUTGOING_QUEUE_FRAMES = 16
 
         fun phyName(phy: Int) = when (phy) {
             BluetoothDevice.PHY_LE_1M -> "normal (1M)"

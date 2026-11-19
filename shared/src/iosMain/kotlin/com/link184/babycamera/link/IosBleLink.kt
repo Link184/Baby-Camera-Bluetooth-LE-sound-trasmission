@@ -18,17 +18,23 @@ import platform.posix.memcpy
 
 /**
  * The Bluetooth LE side lives in Swift (BleBridge.swift, using Core Bluetooth) and is passed to
- * `MainViewController`. Every call happens on the main thread.
+ * `MainViewController`. Every call happens on the main thread. Peers are numbered by the bridge,
+ * with a new number for every connection.
  */
 interface IosBleBridge {
-    fun start(host: Boolean, listener: IosBleListener)
+    /** A host accepts up to [maxPeers] joiners at once. */
+    fun start(host: Boolean, maxPeers: Int, listener: IosBleListener)
 
-    /** Queues [data] for sending, in call order. */
-    fun send(data: NSData)
+    /** Queues [data] for sending to [peer], in call order. */
+    fun send(peer: Int, data: NSData)
 
-    /** Bytes queued but not yet handed to the Bluetooth stack. */
-    fun pendingBytes(): Long
+    /** Bytes queued for [peer] but not yet handed to the Bluetooth stack. */
+    fun pendingBytes(peer: Int): Long
 
+    /** Closes the channel to [peer]; on a joiner this fails the link. */
+    fun disconnect(peer: Int)
+
+    /** Closes everything without further callbacks. */
     fun stop()
 }
 
@@ -38,11 +44,15 @@ interface IosBleListener {
 
     fun onWorking(step: String)
 
-    fun onConnected(peer: String)
+    fun onPeerConnected(peer: Int, name: String)
 
+    /** One peer is gone; on a host the others carry on. */
+    fun onPeerDisconnected(peer: Int)
+
+    /** Everything stopped; the peers still listed are gone too. */
     fun onFailed(reason: String)
 
-    fun onData(data: NSData)
+    fun onData(peer: Int, data: NSData)
 
     fun onRssi(rssi: Int)
 }
@@ -55,11 +65,15 @@ class IosBleLink(private val bridge: IosBleBridge) : PeerLink {
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
     private val _rssi = MutableStateFlow<Int?>(null)
-    private val incomingChannel = Channel<ByteArray>(Channel.UNLIMITED)
+    private val eventChannel = Channel<PeerEvent>(Channel.UNLIMITED)
+
+    /** Connected peers by id; main thread only. */
+    private val peers = LinkedHashMap<Int, Peer>()
+    private var step = "Starting"
 
     override val state: StateFlow<LinkState> = _state
     override val log: Flow<String> = _log
-    override val incoming: Flow<ByteArray> = incomingChannel.receiveAsFlow()
+    override val events: Flow<PeerEvent> = eventChannel.receiveAsFlow()
     override val rssi: StateFlow<Int?> = _rssi
 
     /** iOS gives apps no control over the Bluetooth radio mode. */
@@ -71,21 +85,32 @@ class IosBleLink(private val bridge: IosBleBridge) : PeerLink {
         }
 
         override fun onWorking(step: String) {
-            _state.value = LinkState.Working(step)
+            this@IosBleLink.step = step
+            publishState()
         }
 
-        override fun onConnected(peer: String) {
-            _state.value = LinkState.Connected(peer)
+        override fun onPeerConnected(peer: Int, name: String) {
+            val added = Peer(peer, name)
+            peers[peer] = added
+            eventChannel.trySend(PeerEvent.Joined(added))
+            publishState()
+        }
+
+        override fun onPeerDisconnected(peer: Int) {
+            val removed = peers.remove(peer) ?: return
+            eventChannel.trySend(PeerEvent.Left(removed))
+            publishState()
         }
 
         override fun onFailed(reason: String) {
             _log.tryEmit("FAILED: $reason")
-            _rssi.value = null
+            dropAllPeers()
             _state.value = LinkState.Failed(reason)
         }
 
-        override fun onData(data: NSData) {
-            incomingChannel.trySend(data.toByteArray())
+        override fun onData(peer: Int, data: NSData) {
+            val from = peers[peer] ?: return
+            eventChannel.trySend(PeerEvent.Data(from, data.toByteArray()))
         }
 
         override fun onRssi(rssi: Int) {
@@ -94,19 +119,43 @@ class IosBleLink(private val bridge: IosBleBridge) : PeerLink {
     }
 
     override fun start(role: Role, longRange: Boolean) {
-        _state.value = LinkState.Working("Starting")
-        bridge.start(host = role == Role.Host, listener = listener)
+        dropAllPeers()
+        step = "Starting"
+        publishState()
+        bridge.start(host = role == Role.Host, maxPeers = MAX_LISTENERS, listener = listener)
     }
 
-    override suspend fun send(bytes: ByteArray) {
-        while (_state.value is LinkState.Connected && bridge.pendingBytes() > MAX_PENDING_BYTES) delay(5)
-        if (_state.value is LinkState.Connected) bridge.send(bytes.toNSData())
+    override suspend fun send(peer: Peer, bytes: ByteArray) {
+        while (peers[peer.id] == peer && bridge.pendingBytes(peer.id) > MAX_PENDING_BYTES) delay(5)
+        if (peers[peer.id] == peer) bridge.send(peer.id, bytes.toNSData())
+    }
+
+    override fun broadcast(bytes: ByteArray) {
+        if (peers.isEmpty()) return
+        val data = bytes.toNSData()
+        for (id in peers.keys) {
+            if (bridge.pendingBytes(id) <= MAX_PENDING_BYTES) bridge.send(id, data)
+        }
+    }
+
+    override fun disconnect(peer: Peer) {
+        if (peers[peer.id] == peer) bridge.disconnect(peer.id)
     }
 
     override fun stop() {
         bridge.stop()
-        _rssi.value = null
+        dropAllPeers()
         _state.value = LinkState.Idle
+    }
+
+    private fun publishState() {
+        _state.value = if (peers.isEmpty()) LinkState.Working(step) else LinkState.Connected(peers.values.toList())
+    }
+
+    private fun dropAllPeers() {
+        _rssi.value = null
+        peers.values.forEach { eventChannel.trySend(PeerEvent.Left(it)) }
+        peers.clear()
     }
 
     private companion object {
