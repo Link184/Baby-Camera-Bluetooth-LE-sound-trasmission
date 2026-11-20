@@ -8,8 +8,10 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.link184.babycamera.audio.AUDIO_FRAME_MS
+import com.link184.babycamera.audio.AUDIO_FRAME_SAMPLES
 import com.link184.babycamera.audio.AUDIO_SAMPLE_RATE
 import com.link184.babycamera.audio.AdpcmState
+import com.link184.babycamera.audio.AlertSound
 import com.link184.babycamera.audio.AudioPacket
 import com.link184.babycamera.audio.FrameAssembler
 import com.link184.babycamera.audio.LoudnessDetector
@@ -48,7 +50,8 @@ data class Session(val role: MonitorRole, val longRange: Boolean, val unitId: St
  * Runs the baby monitor. The baby unit hosts the Bluetooth link and streams its microphone to
  * every parent unit that joins (up to [com.link184.babycamera.link.MAX_LISTENERS]); each parent
  * unit plays the sound and alerts when it stays above [threshold]. Both sides ping each other once
- * a second, and parent units reconnect by themselves after drops. The link test screen adds a
+ * a second, and parent units reconnect by themselves after drops, playing
+ * [AlertSound.connectionLost] when one happens. The link test screen adds a
  * throughput test and a simulated audio stream on top of the same link.
  *
  * Meant to live as long as the app process, not a screen, so it keeps going in the background.
@@ -127,6 +130,9 @@ class MonitorController(
     private var lastAlertNanos: Long? = null
 
     private var streamJob: Job? = null
+
+    /** Feeding [AlertSound.connectionLost] to the speaker. */
+    private var lostSoundJob: Job? = null
 
     /** Peers whose throughput result hasn't come back yet. */
     private val bulkWaiting = mutableSetOf<Int>()
@@ -218,6 +224,7 @@ class MonitorController(
         senderJob?.cancel()
         senderJob = null
         microphone.stop()
+        stopLostSound()
         speaker.stop()
         level = null
         dismissAlert()
@@ -281,6 +288,29 @@ class MonitorController(
         streaming = false
     }
 
+    /**
+     * Parent unit: the baby unit is gone without this side asking for it. Written to the speaker a
+     * frame at a time, as the stream would be, a little ahead so a busy main thread doesn't cut it.
+     */
+    private fun playLostSound() {
+        lostSoundJob?.cancel()
+        lostSoundJob = scope.launch {
+            val sound = AlertSound.connectionLost
+            var next = nowNanos()
+            for (start in sound.indices step AUDIO_FRAME_SAMPLES) {
+                speaker.write(sound.copyOfRange(start, start + AUDIO_FRAME_SAMPLES))
+                next += AUDIO_FRAME_MS * 1_000_000L
+                val wait = (next - nowNanos()) / 1_000_000 - LOST_SOUND_LEAD_MS
+                if (wait > 0) delay(wait)
+            }
+        }
+    }
+
+    private fun stopLostSound() {
+        lostSoundJob?.cancel()
+        lostSoundJob = null
+    }
+
     private fun startMicrophone(): String? {
         while (captured.tryReceive().isSuccess) { } // leftovers from the previous session
         // These two are only touched on the microphone thread.
@@ -321,6 +351,7 @@ class MonitorController(
         when (event) {
             is PeerEvent.Joined -> {
                 peers[peer.id] = PeerSession(peer)
+                stopLostSound() // the baby's sound is coming back
                 if (session?.role == MonitorRole.Baby) log("Parent unit ${peer.name} joined (${peers.size} listening)")
             }
 
@@ -344,6 +375,7 @@ class MonitorController(
                 if (session != null) {
                     drops++
                     log("LINK LOST to ${peer.name} (drop #$drops, ${peers.size} still connected)")
+                    if (session?.role == MonitorRole.Parent) playLostSound()
                 }
             }
         }
@@ -456,6 +488,9 @@ class MonitorController(
         const val RECONNECT_DELAY_MS = 2_000L
         const val PING_INTERVAL_MS = 1_000L
         const val CAPTURE_QUEUE_FRAMES = 25 // 1 s of sound
+
+        /** How far [AlertSound.connectionLost] is written ahead of what the speaker plays. */
+        const val LOST_SOUND_LEAD_MS = 200L
 
         /** Alert when at least 1 s of the last 3 s was loud, so a door bang doesn't count. */
         val LOUD_WINDOW_FRAMES = (3_000 / AUDIO_FRAME_MS).toInt()

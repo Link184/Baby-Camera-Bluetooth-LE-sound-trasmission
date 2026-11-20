@@ -122,6 +122,9 @@ class FakeSpeaker(var startError: String? = null) : AudioOutput {
         private set
     val played = mutableListOf<ShortArray>()
 
+    /** Everything written, end to end. */
+    fun playedSamples(): ShortArray = played.flatMap { it.asList() }.toShortArray()
+
     override fun start(sampleRate: Int): String? {
         running = startError == null
         return startError

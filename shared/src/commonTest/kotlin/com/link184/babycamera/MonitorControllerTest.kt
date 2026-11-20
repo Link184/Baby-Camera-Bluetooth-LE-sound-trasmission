@@ -2,6 +2,7 @@ package com.link184.babycamera
 
 import com.link184.babycamera.audio.AUDIO_FRAME_SAMPLES
 import com.link184.babycamera.audio.AdpcmState
+import com.link184.babycamera.audio.AlertSound
 import com.link184.babycamera.audio.AudioPacket
 import com.link184.babycamera.link.Frame
 import com.link184.babycamera.link.PairingCode
@@ -19,6 +20,7 @@ import kotlinx.coroutines.test.runTest
 import kotlin.math.PI
 import kotlin.math.sin
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
@@ -286,6 +288,58 @@ class MonitorControllerTest {
         advanceTimeBy(2)
         assertEquals(FakePeerLink.Start(Role.Join, false, someUnitId), phone.link.starts.last())
         assertEquals(2, phone.link.starts.size)
+    }
+
+    @Test
+    fun parentUnitPlaysTheLostSoundWhenTheBabyUnitDrops() = runTest {
+        val phone = startedParent()
+        phone.link.join(babyUnit)
+        runCurrent()
+        phone.link.fail("gone")
+        runCurrent()
+        assertTrue(phone.speaker.played.isNotEmpty(), "starts right away")
+        assertTrue(phone.speaker.played.size < AlertSound.connectionLost.size / AUDIO_FRAME_SAMPLES, "not all at once")
+
+        advanceTimeBy(5_000)
+        assertContentEquals(AlertSound.connectionLost, phone.speaker.playedSamples())
+    }
+
+    @Test
+    fun lostSoundStopsWhenTheBabyUnitIsBack() = runTest {
+        val phone = startedParent()
+        phone.link.join(babyUnit)
+        runCurrent()
+        phone.link.fail("gone")
+        advanceTimeBy(300)
+        phone.link.join(babyUnit)
+        runCurrent()
+        val played = phone.speaker.played.size
+
+        advanceTimeBy(5_000)
+        assertEquals(played, phone.speaker.played.size)
+        assertTrue(played < AlertSound.connectionLost.size / AUDIO_FRAME_SAMPLES)
+    }
+
+    @Test
+    fun noLostSoundWhenTheParentStops() = runTest {
+        val phone = startedParent()
+        phone.link.join(babyUnit)
+        runCurrent()
+        phone.controller.stop()
+        advanceTimeBy(5_000)
+
+        assertTrue(phone.speaker.played.isEmpty())
+    }
+
+    @Test
+    fun babyUnitStaysQuietWhenAListenerDrops() = runTest {
+        val phone = startedBaby()
+        phone.link.join(parentA)
+        runCurrent()
+        phone.link.leave(parentA)
+        advanceTimeBy(5_000)
+
+        assertTrue(phone.speaker.played.isEmpty())
     }
 
     @Test

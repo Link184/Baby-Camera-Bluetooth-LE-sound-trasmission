@@ -6,10 +6,10 @@ plugins {
 }
 
 kotlin {
-    androidLibrary {
+    android {
         namespace = "com.link184.babycamera.shared"
         compileSdk = 37
-        minSdk = 28
+        minSdk = 29
 
         // Runs commonTest on this computer's JVM: ./gradlew :shared:testAndroidHostTest
         withHostTest {}
