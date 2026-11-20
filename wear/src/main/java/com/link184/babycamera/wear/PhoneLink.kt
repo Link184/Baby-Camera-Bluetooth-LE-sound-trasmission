@@ -23,6 +23,14 @@ import kotlinx.coroutines.tasks.await
  * Call [resume] and [pause] with the activity. Main thread only.
  */
 class PhoneLink(context: Context, private val scope: CoroutineScope) {
+    private val prefs = context.getSharedPreferences("watch", Context.MODE_PRIVATE)
+    private val player = SoundPlayer()
+    private var resumed = false
+
+    /** Whether the watch plays the sound too; remembered. */
+    var soundOn by mutableStateOf(prefs.getBoolean(KEY_SOUND, false))
+        private set
+
     private val dataClient = Wearable.getDataClient(context)
     private val messageClient = Wearable.getMessageClient(context)
     private val nodeClient = Wearable.getNodeClient(context)
@@ -57,10 +65,13 @@ class PhoneLink(context: Context, private val scope: CoroutineScope) {
         if (event.path == WatchProtocol.LEVEL_PATH) {
             level = WatchProtocol.decodeLevel(event.data)
             lastHeardAt = SystemClock.elapsedRealtime()
+            if (soundOn) WatchProtocol.decodeSound(event.data).forEach(player::play)
         }
     }
 
     fun resume() {
+        resumed = true
+        if (soundOn) player.start()
         dataClient.addListener(dataListener)
         messageClient.addListener(messageListener)
         job = scope.launch {
@@ -69,17 +80,28 @@ class PhoneLink(context: Context, private val scope: CoroutineScope) {
             while (true) {
                 val phones = phones()
                 phoneInReach = phones.isNotEmpty()
-                for (phone in phones) send(phone, WatchProtocol.WATCHING_PATH)
+                for (phone in phones) send(phone, WatchProtocol.WATCHING_PATH, WatchProtocol.encodeWatching(soundOn))
                 delay(WatchProtocol.WATCHING_PING_MS)
             }
         }
     }
 
     fun pause() {
+        resumed = false
+        player.stop()
         job?.cancel()
         dataClient.removeListener(dataListener)
         messageClient.removeListener(messageListener)
         scope.launch { for (phone in phones()) send(phone, WatchProtocol.STOPPED_WATCHING_PATH) }
+    }
+
+    fun toggleSound() {
+        soundOn = !soundOn
+        prefs.edit().putBoolean(KEY_SOUND, soundOn).apply()
+        if (!resumed) return
+        if (soundOn) player.start() else player.stop()
+        val watching = WatchProtocol.encodeWatching(soundOn)
+        scope.launch { for (phone in phones()) send(phone, WatchProtocol.WATCHING_PATH, watching) }
     }
 
     fun dismissAlert() {
@@ -112,9 +134,9 @@ class PhoneLink(context: Context, private val scope: CoroutineScope) {
         emptyList()
     }
 
-    private suspend fun send(node: String, path: String) {
+    private suspend fun send(node: String, path: String, data: ByteArray = ByteArray(0)) {
         try {
-            messageClient.sendMessage(node, path, ByteArray(0)).await()
+            messageClient.sendMessage(node, path, data).await()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -122,3 +144,5 @@ class PhoneLink(context: Context, private val scope: CoroutineScope) {
         }
     }
 }
+
+private const val KEY_SOUND = "sound"

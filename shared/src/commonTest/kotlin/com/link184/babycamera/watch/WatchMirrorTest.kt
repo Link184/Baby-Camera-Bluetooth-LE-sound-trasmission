@@ -35,7 +35,9 @@ class WatchMirrorTest {
         val published = mutableListOf<WatchState>()
         var result = WatchPublish.Sent
         override var watching = false
+        override var wantsSound = false
         val levels = mutableListOf<Float?>()
+        val sound = mutableListOf<List<ByteArray>>()
         var onDismiss: (() -> Unit)? = null
         var stopped = false
 
@@ -52,8 +54,9 @@ class WatchMirrorTest {
             return result
         }
 
-        override suspend fun sendLevel(level: Float?) {
+        override suspend fun sendLevel(level: Float?, sound: List<ByteArray>) {
             levels += level
+            this.sound += sound
         }
     }
 
@@ -142,6 +145,32 @@ class WatchMirrorTest {
         phone.watch.watching = false
         advanceTimeBy(5_000)
         assertEquals(4, phone.watch.levels.size)
+    }
+
+    @Test
+    fun theSoundGoesOutOnlyToAWatchThatWantsIt() = runTest {
+        val phone = Phone(this)
+        phone.startParent()
+        phone.link.join(babyUnit)
+        phone.watch.watching = true
+        runCurrent()
+        phone.link.receive(babyUnit, audioFrame(amplitude = 8_000, seq = 0))
+        advanceTimeBy(300)
+        assertTrue(phone.watch.sound.all { it.isEmpty() }, "sound off on the watch")
+
+        phone.watch.wantsSound = true
+        val frames = (1..3).map { audioFrame(amplitude = 8_000, seq = it) }
+        frames.forEach { phone.link.receive(babyUnit, it) }
+        advanceTimeBy(300)
+        val sent = phone.watch.sound.flatten()
+        assertEquals(frames.map { it.payload.toList() }, sent.map { it.toList() }, "each packet once, in order")
+    }
+
+    @Test
+    fun soundBatchesAreLengthPrefixed() {
+        val batch = encodeSoundBatch(listOf(byteArrayOf(1, 2, 3), ByteArray(300) { 9 }))
+        assertEquals(2 + 3 + 2 + 300, batch.size)
+        assertEquals(listOf<Byte>(0, 3, 1, 2, 3, 1, 44), batch.take(7))
     }
 
     @Test

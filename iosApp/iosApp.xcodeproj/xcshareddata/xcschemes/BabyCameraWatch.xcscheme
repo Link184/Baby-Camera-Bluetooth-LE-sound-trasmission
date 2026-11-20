@@ -17,6 +17,7 @@
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "BC0000000000000000000040"
                BuildableName = "BabyCameraWatch.app"
+               BlueprintName = "BabyCameraWatch"
                ReferencedContainer = "container:iosApp.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -59,6 +60,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "BC0000000000000000000040"
             BuildableName = "BabyCameraWatch.app"
+            BlueprintName = "BabyCameraWatch"
             ReferencedContainer = "container:iosApp.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -75,6 +77,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "BC0000000000000000000040"
             BuildableName = "BabyCameraWatch.app"
+            BlueprintName = "BabyCameraWatch"
             ReferencedContainer = "container:iosApp.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>

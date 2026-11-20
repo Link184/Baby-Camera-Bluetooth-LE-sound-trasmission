@@ -7,7 +7,9 @@ import WatchConnectivity
 /// - The parent unit's state goes in the application context: WatchConnectivity keeps the latest
 ///   one and hands it to the watch app whenever it runs.
 /// - The sound level goes as messages, only while the watch app is on screen: it sends "watching"
-///   every 10 seconds then, and "stopped" when it leaves.
+///   every 10 seconds then, and "stopped" when it leaves. "watching" says whether the watch has its
+///   sound on; if so, the messages carry the sound too ("sound": packets in the shared code's
+///   `encodeSoundBatch` format).
 /// - "dismiss" from the watch dismisses the crying alert.
 ///
 /// The keys and message types must match PhoneLink.swift in the watch app.
@@ -16,6 +18,9 @@ final class WatchBridge: NSObject, IosWatchBridge, WCSessionDelegate {
 
     /// Until when the watch wants the sound level.
     private var watchingUntil = Date.distantPast
+
+    /** Whether the watch has its sound on. */
+    private var soundOn = false
 
     func start(listener: IosWatchListener) {
         self.listener = listener
@@ -51,9 +56,15 @@ final class WatchBridge: NSObject, IosWatchBridge, WCSessionDelegate {
         WCSession.isSupported() && WCSession.default.isReachable && Date() < watchingUntil
     }
 
-    /// From 0 to 1, or negative for none.
-    func sendLevel(level: Float) {
-        WCSession.default.sendMessage(["level": level], replyHandler: nil, errorHandler: nil)
+    func wantsSound() -> Bool {
+        soundOn && isWatching()
+    }
+
+    /// `level` from 0 to 1, or negative for none; `sound` as the watch plays it, or nil for none.
+    func sendLevel(level: Float, sound: Data?) {
+        var message: [String: Any] = ["level": level]
+        if let sound, soundOn { message["sound"] = sound }
+        WCSession.default.sendMessage(message, replyHandler: nil, errorHandler: nil)
     }
 
     // MARK: - WCSessionDelegate (called on a background queue)
@@ -68,10 +79,15 @@ final class WatchBridge: NSObject, IosWatchBridge, WCSessionDelegate {
 
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
         let type = message["type"] as? String
+        let sound = message["sound"] as? Bool ?? false
         DispatchQueue.main.async {
             switch type {
-            case "watching": self.watchingUntil = Date().addingTimeInterval(25)
-            case "stopped": self.watchingUntil = .distantPast
+            case "watching":
+                self.watchingUntil = Date().addingTimeInterval(25)
+                self.soundOn = sound
+            case "stopped":
+                self.watchingUntil = .distantPast
+                self.soundOn = false
             case "dismiss": self.listener?.onDismiss()
             default: break
             }

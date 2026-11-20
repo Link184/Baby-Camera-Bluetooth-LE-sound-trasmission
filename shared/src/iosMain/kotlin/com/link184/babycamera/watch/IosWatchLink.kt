@@ -1,5 +1,11 @@
 package com.link184.babycamera.watch
 
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.addressOf
+import kotlinx.cinterop.usePinned
+import platform.Foundation.NSData
+import platform.Foundation.create
+
 /**
  * WatchConnectivity, implemented in Swift (WatchBridge.swift), kept to plain types so Swift can
  * implement it easily. Main thread only.
@@ -14,8 +20,11 @@ interface IosWatchBridge {
 
     fun isWatching(): Boolean
 
-    /** From 0 to 1, or negative for none. */
-    fun sendLevel(level: Float)
+    /** Whether the watch app on screen has its sound on. */
+    fun wantsSound(): Boolean
+
+    /** [level] from 0 to 1, or negative for none; [sound] in the format of [encodeSoundBatch], or null for none. */
+    fun sendLevel(level: Float, sound: NSData?)
 
     companion object {
         const val PUBLISH_SENT = 0
@@ -48,5 +57,13 @@ class IosWatchLink(private val bridge: IosWatchBridge) : WatchLink {
 
     override val watching: Boolean get() = bridge.isWatching()
 
-    override suspend fun sendLevel(level: Float?) = bridge.sendLevel(level ?: -1f)
+    override val wantsSound: Boolean get() = bridge.wantsSound()
+
+    override suspend fun sendLevel(level: Float?, sound: List<ByteArray>) =
+        bridge.sendLevel(level ?: -1f, if (sound.isEmpty()) null else encodeSoundBatch(sound).toNSData())
+}
+
+@OptIn(ExperimentalForeignApi::class)
+private fun ByteArray.toNSData(): NSData = usePinned {
+    NSData.create(bytes = it.addressOf(0), length = size.toULong())
 }

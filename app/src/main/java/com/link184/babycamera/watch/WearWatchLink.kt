@@ -20,8 +20,11 @@ class WearWatchLink(context: Context) : WatchLink {
     private val dataClient = Wearable.getDataClient(context)
     private val messageClient = Wearable.getMessageClient(context)
 
-    /** Watches showing the app, by node ID, with the elapsed-realtime time until which they get the level. */
-    private val watchers = mutableMapOf<String, Long>()
+    /** A watch showing the app: until when (elapsed realtime) it gets the level, and whether the sound too. */
+    private class Watcher(val until: Long, val sound: Boolean)
+
+    /** Watches showing the app, by node ID. */
+    private val watchers = mutableMapOf<String, Watcher>()
     private var onDismiss: () -> Unit = {}
 
     private val listener = MessageClient.OnMessageReceivedListener(::onMessage)
@@ -39,9 +42,12 @@ class WearWatchLink(context: Context) : WatchLink {
     override val watching: Boolean
         get() {
             val now = SystemClock.elapsedRealtime()
-            watchers.entries.removeAll { it.value <= now }
+            watchers.entries.removeAll { it.value.until <= now }
             return watchers.isNotEmpty()
         }
+
+    override val wantsSound: Boolean
+        get() = watching && watchers.values.any { it.sound }
 
     override suspend fun publish(state: WatchState): WatchPublish {
         val request = PutDataMapRequest.create(WatchProtocol.STATE_PATH)
@@ -70,9 +76,11 @@ class WearWatchLink(context: Context) : WatchLink {
         }
     }
 
-    override suspend fun sendLevel(level: Float?) {
-        val payload = WatchProtocol.encodeLevel(level)
-        for (node in watchers.keys.toList()) {
+    override suspend fun sendLevel(level: Float?, sound: List<ByteArray>) {
+        val levelOnly = WatchProtocol.encodeLevel(level)
+        val withSound = if (sound.isEmpty()) levelOnly else WatchProtocol.encodeLevel(level, encodeSoundBatch(sound))
+        for ((node, watcher) in watchers.toList()) {
+            val payload = if (watcher.sound) withSound else levelOnly
             try {
                 messageClient.sendMessage(node, WatchProtocol.LEVEL_PATH, payload).await()
             } catch (e: CancellationException) {
@@ -85,7 +93,10 @@ class WearWatchLink(context: Context) : WatchLink {
 
     private fun onMessage(event: MessageEvent) {
         when (event.path) {
-            WatchProtocol.WATCHING_PATH -> watchers[event.sourceNodeId] = SystemClock.elapsedRealtime() + WatchProtocol.WATCHING_FOR_MS
+            WatchProtocol.WATCHING_PATH -> watchers[event.sourceNodeId] = Watcher(
+                until = SystemClock.elapsedRealtime() + WatchProtocol.WATCHING_FOR_MS,
+                sound = WatchProtocol.decodeWatching(event.data),
+            )
             WatchProtocol.STOPPED_WATCHING_PATH -> watchers.remove(event.sourceNodeId)
             WatchProtocol.DISMISS_PATH -> onDismiss()
         }

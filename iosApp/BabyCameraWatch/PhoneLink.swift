@@ -24,7 +24,11 @@ final class PhoneLink: NSObject, ObservableObject, WCSessionDelegate {
     /// Whether the iPhone is in reach; nil until known.
     @Published private(set) var phoneReachable: Bool?
 
+    /// Whether the watch plays the sound too; remembered.
+    @Published private(set) var soundOn = UserDefaults.standard.bool(forKey: "sound")
+
     private var timer: Timer?
+    private let player = SoundPlayer()
 
     override init() {
         super.init()
@@ -36,6 +40,7 @@ final class PhoneLink: NSObject, ObservableObject, WCSessionDelegate {
 
     func resume() {
         guard timer == nil else { return }
+        if soundOn { player.start() }
         send("watching")
         // The iPhone sends the level for 25 s after each "watching".
         timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
@@ -46,7 +51,16 @@ final class PhoneLink: NSObject, ObservableObject, WCSessionDelegate {
     func pause() {
         timer?.invalidate()
         timer = nil
+        player.stop()
         send("stopped")
+    }
+
+    func toggleSound() {
+        soundOn.toggle()
+        UserDefaults.standard.set(soundOn, forKey: "sound")
+        guard timer != nil else { return } // not on screen: applied on resume()
+        if soundOn { player.start() } else { player.stop() }
+        send("watching")
     }
 
     func dismiss() {
@@ -56,7 +70,7 @@ final class PhoneLink: NSObject, ObservableObject, WCSessionDelegate {
     private func send(_ type: String) {
         let session = WCSession.default
         guard session.activationState == .activated, session.isReachable else { return }
-        session.sendMessage(["type": type], replyHandler: nil, errorHandler: nil)
+        session.sendMessage(["type": type, "sound": soundOn], replyHandler: nil, errorHandler: nil)
     }
 
     private func apply(_ context: [String: Any]) {
@@ -88,9 +102,11 @@ final class PhoneLink: NSObject, ObservableObject, WCSessionDelegate {
 
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
         guard let level = (message["level"] as? NSNumber)?.floatValue else { return }
+        let sound = (message["sound"] as? Data).map(AdpcmPacket.split) ?? []
         DispatchQueue.main.async {
             self.level = level < 0 ? nil : level
             self.lastHeard = Date()
+            if self.soundOn && self.timer != nil { sound.forEach(self.player.play) }
         }
     }
 

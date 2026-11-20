@@ -20,6 +20,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import androidx.wear.compose.material3.Button
+import androidx.wear.compose.material3.ButtonDefaults
+import androidx.wear.compose.material3.CompactButton
 import androidx.wear.compose.material3.CircularProgressIndicator
 import androidx.wear.compose.material3.MaterialTheme
 import androidx.wear.compose.material3.ProgressIndicatorDefaults
@@ -28,7 +30,10 @@ import com.link184.babycamera.watch.WatchProtocol
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
-/** Shows what the parent unit on the phone hears, and lets the parent dismiss its crying alert. */
+/**
+ * Shows what the parent unit on the phone hears, plays it too if the parent switches the sound on,
+ * and lets the parent dismiss its crying alert.
+ */
 class WatchActivity : ComponentActivity() {
     private lateinit var phone: PhoneLink
 
@@ -67,12 +72,18 @@ private fun WatchScreen(phone: PhoneLink) {
         phone.phoneInReach == false -> Message("Phone out of reach", "Keep your phone closer to the watch.")
         !heardRecently -> Message("Waiting for the phone", "Open BabyCamera on your phone.")
         state == null || !state.listening -> Message(state?.status ?: "Not listening", "Start the parent unit on your phone.")
-        else -> Monitor(state, phone.level, onDismiss = phone::dismissAlert)
+        else -> Monitor(state, phone.level, phone.soundOn, onToggleSound = phone::toggleSound, onDismiss = phone::dismissAlert)
     }
 }
 
 @Composable
-private fun Monitor(state: WatchProtocol.State, level: Float?, onDismiss: () -> Unit) {
+private fun Monitor(
+    state: WatchProtocol.State,
+    level: Float?,
+    soundOn: Boolean,
+    onToggleSound: () -> Unit,
+    onDismiss: () -> Unit,
+) {
     val colors = MaterialTheme.colorScheme
     val loud = level != null && level >= state.threshold
     Box(
@@ -105,8 +116,18 @@ private fun Monitor(state: WatchProtocol.State, level: Float?, onDismiss: () -> 
                     color = colors.onSurfaceVariant,
                 )
             }
+            SoundButton(soundOn, onToggleSound)
         }
     }
+}
+
+@Composable
+private fun SoundButton(soundOn: Boolean, onToggle: () -> Unit) {
+    CompactButton(
+        onClick = onToggle,
+        colors = if (soundOn) ButtonDefaults.buttonColors() else ButtonDefaults.filledTonalButtonColors(),
+        label = { Text(if (soundOn) "\uD83D\uDD0A Sound on" else "\uD83D\uDD07 Sound off") },
+    )
 }
 
 @Composable

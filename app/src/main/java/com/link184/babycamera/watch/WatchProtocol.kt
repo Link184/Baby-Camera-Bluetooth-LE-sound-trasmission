@@ -12,9 +12,11 @@ import java.nio.ByteBuffer
  *   and synced, so a watch opening the app later still gets the latest one.
  * - [LEVEL_PATH], messages from the phone: the sound level, every [LEVEL_INTERVAL_MS], but only to
  *   watches that showed the app in the last [WATCHING_FOR_MS]. They also tell the watch the phone
- *   app is alive, so they keep coming while nothing is heard.
- * - [WATCHING_PATH], a message from the watch every [WATCHING_PING_MS] while it shows the app;
- *   [STOPPED_WATCHING_PATH] when it stops.
+ *   app is alive, so they keep coming while nothing is heard. To watches with their sound on they
+ *   also carry the sound heard since the last one (see [encodeLevel]).
+ * - [WATCHING_PATH], a message from the watch every [WATCHING_PING_MS] while it shows the app, and
+ *   right away when its sound is switched on or off (see [encodeWatching]); [STOPPED_WATCHING_PATH]
+ *   when it stops.
  * - [DISMISS_PATH], a message from the watch: the parent dismissed the crying alert there.
  */
 object WatchProtocol {
@@ -58,11 +60,34 @@ object WatchProtocol {
         }
     }
 
-    /** The sound level from 0 to 1, or null when there is none (not connected). */
-    fun encodeLevel(level: Float?): ByteArray = ByteBuffer.allocate(4).putFloat(level ?: Float.NaN).array()
+    /** Whether the watch wants the sound too. */
+    fun encodeWatching(sound: Boolean): ByteArray = byteArrayOf(if (sound) 1 else 0)
+
+    fun decodeWatching(bytes: ByteArray): Boolean = bytes.firstOrNull() == 1.toByte()
+
+    /**
+     * The sound level from 0 to 1, or null when there is none (not connected), as a 4-byte float;
+     * then any [sound], already in the format of the shared code's `encodeSoundBatch`: sound packets
+     * (`AudioPacket`s, oldest first), each as a 2-byte big-endian length and then the packet.
+     */
+    fun encodeLevel(level: Float?, sound: ByteArray = ByteArray(0)): ByteArray =
+        ByteBuffer.allocate(4 + sound.size).putFloat(level ?: Float.NaN).put(sound).array()
 
     fun decodeLevel(bytes: ByteArray): Float? =
-        if (bytes.size != 4) null else ByteBuffer.wrap(bytes).float.takeUnless { it.isNaN() }
+        if (bytes.size < 4) null else ByteBuffer.wrap(bytes).float.takeUnless { it.isNaN() }
+
+    /** The sound packets in a [LEVEL_PATH] message; empty for none. */
+    fun decodeSound(bytes: ByteArray): List<ByteArray> {
+        val packets = mutableListOf<ByteArray>()
+        var at = 4
+        while (at + 2 <= bytes.size) {
+            val size = ((bytes[at].toInt() and 0xFF) shl 8) or (bytes[at + 1].toInt() and 0xFF)
+            if (at + 2 + size > bytes.size) break
+            packets += bytes.copyOfRange(at + 2, at + 2 + size)
+            at += 2 + size
+        }
+        return packets
+    }
 
     private const val KEY_LISTENING = "listening"
     private const val KEY_CONNECTED = "connected"

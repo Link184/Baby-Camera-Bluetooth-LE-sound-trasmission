@@ -25,7 +25,8 @@ struct WatchView: View {
         } else if !heardRecently {
             MessageView(title: "Waiting for the iPhone", detail: "Open BabyCamera on your iPhone.")
         } else if let state = phone.state, state.listening {
-            MeterView(state: state, level: phone.level, onDismiss: phone.dismiss)
+            MeterView(state: state, level: phone.level, soundOn: phone.soundOn,
+                      onToggleSound: phone.toggleSound, onDismiss: phone.dismiss)
         } else {
             MessageView(title: phone.state?.status ?? "Not listening", detail: "Start the parent unit on your iPhone.")
         }
@@ -35,6 +36,8 @@ struct WatchView: View {
 private struct MeterView: View {
     let state: PhoneLink.State
     let level: Float?
+    let soundOn: Bool
+    let onToggleSound: () -> Void
     let onDismiss: () -> Void
 
     var body: some View {
@@ -63,11 +66,30 @@ private struct MeterView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+                SoundButton(soundOn: soundOn, onToggle: onToggleSound)
             }
             .padding(18)
         }
         .padding(4)
         .background(state.crying ? Color.red.opacity(0.35) : Color.clear)
+    }
+}
+
+/// Switches the watch's own playback of the sound on and off.
+private struct SoundButton: View {
+    let soundOn: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle) {
+            Image(systemName: soundOn ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                .font(.footnote)
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.capsule)
+        .tint(soundOn ? .green : .gray)
+        .frame(width: 56)
+        .accessibilityLabel(soundOn ? "Sound on" : "Sound off")
     }
 }
 

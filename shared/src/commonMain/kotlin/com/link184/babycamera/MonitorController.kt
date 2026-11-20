@@ -112,6 +112,9 @@ class MonitorController(
     var streamReport by mutableStateOf<String?>(null)
         private set
 
+    /** Parent unit: every sound packet from the baby unit, still encoded (see [AudioPacket]), e.g. for the watch app. */
+    var onSoundPacket: ((ByteArray) -> Unit)? = null
+
     private val clock = timeSource.markNow()
 
     /** One per open connection, by [Peer.id]. */
@@ -404,6 +407,7 @@ class MonitorController(
         val now = nowNanos()
         level = packet.level
         speaker.write(packet.pcm)
+        onSoundPacket?.invoke(payload)
         from.audioStats.onPacket(packet.seq, now)?.let {
             audioReport = it
             log("Sound: $it")
