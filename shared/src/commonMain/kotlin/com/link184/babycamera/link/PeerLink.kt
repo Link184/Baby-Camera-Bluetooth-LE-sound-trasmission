@@ -71,12 +71,16 @@ interface PeerLink {
     /** Signal strength of the host in dBm, when this side can measure it (only the joiner can). */
     val rssi: StateFlow<Int?>
 
-    /** Whether this phone lets the app ask for the long-range (LE Coded) radio mode. */
+    /**
+     * Whether this phone has the long-range (LE Coded) radio mode. If so, each connection switches
+     * between it and the normal mode by signal strength where the peer has it too.
+     */
     val supportsLongRange: Boolean
 
     /**
      * [unitId] is the baby unit's ID, a UUID: the host advertises it, the joiner looks for it.
-     * See [PairingCode].
+     * See [PairingCode]. [longRange] keeps every connection on long range, for testing; then only
+     * peers that have it can connect.
      */
     fun start(role: Role, longRange: Boolean, unitId: String)
 

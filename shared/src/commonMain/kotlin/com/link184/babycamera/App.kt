@@ -407,9 +407,10 @@ private fun ColumnScope.LinkTestScreen(controller: MonitorController, onBack: ()
         )
         Text(
             if (supportsLongRange) {
-                "Long range (LE Coded) - both phones must be Android with it on. Applies on the next start."
+                "Always long range (LE Coded), for testing. Off, Android phones switch to it by themselves when " +
+                    "the signal gets weak. On, only Android phones with it on can join. Applies on the next start."
             } else {
-                "Long range not available on this phone"
+                "Long range not available on this phone: normal range only"
             },
             style = MaterialTheme.typography.bodySmall,
         )

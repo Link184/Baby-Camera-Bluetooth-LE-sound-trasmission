@@ -20,6 +20,7 @@ import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.AdvertisingSet
 import android.bluetooth.le.AdvertisingSetCallback
 import android.bluetooth.le.AdvertisingSetParameters
+import android.bluetooth.le.BluetoothLeAdvertiser
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
@@ -30,6 +31,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.ParcelUuid
+import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.RequiresApi
 import kotlinx.coroutines.CoroutineScope
@@ -69,6 +71,12 @@ fun requiredBlePermissions(): Array<String> =
  *
  * No Bluetooth pairing is used, so the system never shows a pairing dialog, and the channel is
  * unencrypted at the Bluetooth level. `SecureLink` encrypts and authenticates everything on top.
+ *
+ * Radio mode is per connection. On phones with long range (LE Coded), the host advertises both
+ * normally, for iPhones and older phones, and in long range, which reaches further; the joiner
+ * listens for both, then switches its connection between the two by signal strength (see
+ * [RadioModeChooser]). Asking [start] for long range keeps everything on it instead, for testing:
+ * then only phones with long range can join.
  */
 @SuppressLint("MissingPermission") // checked in start()
 class AndroidBleLink(context: Context) : PeerLink {
@@ -122,7 +130,7 @@ class AndroidBleLink(context: Context) : PeerLink {
                 fail(failure ?: "Bluetooth unavailable")
                 return@post
             }
-            if (longRange && !supportsLongRange) log("Long range not supported here - using normal range")
+            if (!supportsLongRange) log("Long range not supported here - using normal range only")
             log(
                 "Bluetooth ready: codedPhy=${bluetooth.isLeCodedPhySupported} " +
                     "extendedAdvertising=${bluetooth.isLeExtendedAdvertisingSupported} " +
@@ -134,7 +142,12 @@ class AndroidBleLink(context: Context) : PeerLink {
                 fail("Bad baby unit ID: $unitId")
                 return@post
             }
-            Run(bluetooth, role, longRange && supportsLongRange, unitUuid).also { current = it }.start()
+            val range = when {
+                !supportsLongRange -> RangeMode.NormalOnly
+                longRange -> RangeMode.LongRangeOnly
+                else -> RangeMode.BySignal
+            }
+            Run(bluetooth, role, range, unitUuid).also { current = it }.start()
         }
     }
 
@@ -228,7 +241,7 @@ class AndroidBleLink(context: Context) : PeerLink {
     private inner class Run(
         private val bluetooth: BluetoothAdapter,
         private val role: Role,
-        private val coded: Boolean,
+        private val range: RangeMode,
         /** Advertised by the host and looked for by the joiner. */
         private val unitUuid: ParcelUuid,
     ) {
@@ -240,6 +253,9 @@ class AndroidBleLink(context: Context) : PeerLink {
         private var scanCallback: ScanCallback? = null
         private var gatt: BluetoothGatt? = null
         private var psmReceived = false
+
+        /** Joiner in [RangeMode.BySignal]: when to switch the connection's radio mode. */
+        private val chooser = if (range == RangeMode.BySignal && role == Role.Join) RadioModeChooser() else null
 
         /** The joiner's channel while it is being opened. */
         @Volatile
@@ -303,7 +319,8 @@ class AndroidBleLink(context: Context) : PeerLink {
 
                 override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
                     val connected = newState == BluetoothProfile.STATE_CONNECTED
-                    if (connected && coded) {
+                    // Otherwise the joiner picks the mode: it is the side that measures the signal.
+                    if (connected && range == RangeMode.LongRangeOnly) {
                         gattServer?.setPreferredPhy(
                             device,
                             BluetoothDevice.PHY_LE_CODED_MASK,
@@ -379,11 +396,19 @@ class AndroidBleLink(context: Context) : PeerLink {
             startAdvertising()
         }
 
-        /** Advertising problems only end the run while nobody is listening yet. */
+        /**
+         * Advertising problems only end the run while nobody is listening yet, and only when no
+         * kind of advert is left: a phone that can't run both kinds at once still advertises one.
+         */
         private fun advertisingFailed(reason: String) {
-            if (open.isEmpty()) fail(reason) else log("Cannot advertise for more listeners: $reason")
+            when {
+                advertising -> log("$reason - still advertising the other way")
+                open.isEmpty() -> fail(reason)
+                else -> log("Cannot advertise for more listeners: $reason")
+            }
         }
 
+        /** Normal adverts unless long range only; long-range ones too where the phone has it. */
         private fun startAdvertising() {
             val advertiser = bluetooth.bluetoothLeAdvertiser
                 ?: return advertisingFailed("This phone cannot advertise over Bluetooth LE")
@@ -391,61 +416,68 @@ class AndroidBleLink(context: Context) : PeerLink {
                 .addServiceUuid(unitUuid)
                 .setIncludeDeviceName(false)
                 .build()
-            if (coded) {
-                val parameters = AdvertisingSetParameters.Builder()
-                    .setLegacyMode(false)
-                    .setConnectable(true)
-                    .setScannable(false)
-                    .setPrimaryPhy(BluetoothDevice.PHY_LE_CODED)
-                    .setSecondaryPhy(BluetoothDevice.PHY_LE_CODED)
-                    .setInterval(AdvertisingSetParameters.INTERVAL_LOW)
-                    .setTxPowerLevel(AdvertisingSetParameters.TX_POWER_HIGH)
-                    .build()
-                val callback = object : AdvertisingSetCallback() {
-                    override fun onAdvertisingSetStarted(set: AdvertisingSet?, txPower: Int, status: Int) {
-                        handler.post {
-                            if (!active || advertisingSetCallback !== this) return@post
-                            if (status == ADVERTISE_SUCCESS) {
-                                log("Advertising in long-range mode (tx power $txPower dBm)")
+            if (range != RangeMode.LongRangeOnly) startNormalAdvertising(advertiser, data)
+            if (range != RangeMode.NormalOnly) startLongRangeAdvertising(advertiser, data)
+        }
+
+        private fun startNormalAdvertising(advertiser: BluetoothLeAdvertiser, data: AdvertiseData) {
+            val settings = AdvertiseSettings.Builder()
+                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+                .setConnectable(true)
+                .setTimeout(0)
+                .build()
+            val callback = object : AdvertiseCallback() {
+                override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+                    handler.post {
+                        if (!active || advertiseCallback !== this) return@post
+                        log("Advertising")
+                        hostStep = "Advertising - waiting for a joiner"
+                        publishHostState()
+                    }
+                }
+
+                override fun onStartFailure(errorCode: Int) {
+                    handler.post {
+                        if (!active || advertiseCallback !== this) return@post
+                        advertiseCallback = null
+                        advertisingFailed("Advertising failed (error $errorCode)")
+                    }
+                }
+            }
+            advertiseCallback = callback
+            advertiser.startAdvertising(settings, data, callback)
+        }
+
+        private fun startLongRangeAdvertising(advertiser: BluetoothLeAdvertiser, data: AdvertiseData) {
+            val parameters = AdvertisingSetParameters.Builder()
+                .setLegacyMode(false)
+                .setConnectable(true)
+                .setScannable(false)
+                .setPrimaryPhy(BluetoothDevice.PHY_LE_CODED)
+                .setSecondaryPhy(BluetoothDevice.PHY_LE_CODED)
+                .setInterval(AdvertisingSetParameters.INTERVAL_LOW)
+                .setTxPowerLevel(AdvertisingSetParameters.TX_POWER_HIGH)
+                .build()
+            val callback = object : AdvertisingSetCallback() {
+                override fun onAdvertisingSetStarted(set: AdvertisingSet?, txPower: Int, status: Int) {
+                    handler.post {
+                        if (!active || advertisingSetCallback !== this) return@post
+                        if (status == ADVERTISE_SUCCESS) {
+                            log("Advertising in long-range mode (tx power $txPower dBm)")
+                            if (range == RangeMode.LongRangeOnly) {
                                 hostStep = "Advertising (long range) - waiting for a joiner"
                                 publishHostState()
-                            } else {
-                                advertisingSetCallback = null
-                                advertisingFailed("Long-range advertising failed (status $status)")
                             }
+                        } else {
+                            advertisingSetCallback = null
+                            advertisingFailed("Long-range advertising failed (status $status)")
                         }
                     }
                 }
-                advertisingSetCallback = callback
-                advertiser.startAdvertisingSet(parameters, data, null, null, null, callback)
-            } else {
-                val settings = AdvertiseSettings.Builder()
-                    .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-                    .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-                    .setConnectable(true)
-                    .setTimeout(0)
-                    .build()
-                val callback = object : AdvertiseCallback() {
-                    override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-                        handler.post {
-                            if (!active || advertiseCallback !== this) return@post
-                            log("Advertising")
-                            hostStep = "Advertising - waiting for a joiner"
-                            publishHostState()
-                        }
-                    }
-
-                    override fun onStartFailure(errorCode: Int) {
-                        handler.post {
-                            if (!active || advertiseCallback !== this) return@post
-                            advertiseCallback = null
-                            advertisingFailed("Advertising failed (error $errorCode)")
-                        }
-                    }
-                }
-                advertiseCallback = callback
-                advertiser.startAdvertising(settings, data, callback)
             }
+            advertisingSetCallback = callback
+            advertiser.startAdvertisingSet(parameters, data, null, null, null, callback)
         }
 
         private fun stopAdvertising() {
@@ -464,8 +496,9 @@ class AndroidBleLink(context: Context) : PeerLink {
             val settings = ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .apply {
-                    if (coded) {
+                    if (range != RangeMode.NormalOnly) {
                         // Long-range adverts are "extended" adverts, which legacy scanning ignores.
+                        // This reports normal adverts too.
                         setLegacy(false)
                         setPhy(ScanSettings.PHY_LE_ALL_SUPPORTED)
                     }
@@ -482,7 +515,7 @@ class AndroidBleLink(context: Context) : PeerLink {
             }
             scanCallback = callback
             scanner.startScan(filters, settings, callback)
-            log(if (coded) "Scanning (normal and long-range adverts)" else "Scanning")
+            log(if (range != RangeMode.NormalOnly) "Scanning (normal and long-range adverts)" else "Scanning")
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) log("Note: on Android 10/11, Location must be switched on for scanning")
             _state.value = LinkState.Working("Looking for the baby unit")
         }
@@ -519,13 +552,7 @@ class AndroidBleLink(context: Context) : PeerLink {
                 }
                 log("GATT connected (status $status)")
                 g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
-                if (coded) {
-                    g.setPreferredPhy(
-                        BluetoothDevice.PHY_LE_CODED_MASK,
-                        BluetoothDevice.PHY_LE_CODED_MASK,
-                        BluetoothDevice.PHY_OPTION_S8,
-                    )
-                }
+                if (range == RangeMode.LongRangeOnly) requestMode(g, RadioMode.LongRange)
                 g.readPhy()
                 handler.post(rssiPoll)
                 _state.value = LinkState.Working("Reading the host's channel number")
@@ -553,15 +580,62 @@ class AndroidBleLink(context: Context) : PeerLink {
                 onPsmRead(status, characteristic.value)
 
             override fun onReadRemoteRssi(g: BluetoothGatt, rssi: Int, status: Int) {
-                if (active && status == BluetoothGatt.GATT_SUCCESS) _rssi.value = rssi
+                if (!active || status != BluetoothGatt.GATT_SUCCESS) return
+                _rssi.value = rssi
+                val chooser = chooser ?: return
+                val couldUseLongRange = chooser.longRangeAvailable
+                val switchTo = chooser.onRssi(rssi, SystemClock.elapsedRealtime())
+                if (couldUseLongRange && !chooser.longRangeAvailable) {
+                    log("The baby unit didn't answer the switch to long range - staying on normal range")
+                }
+                when (switchTo) {
+                    RadioMode.LongRange -> {
+                        log("Signal weak (${chooser.decidedAtDbm} dBm) - switching to long range")
+                        requestMode(g, RadioMode.LongRange)
+                    }
+                    RadioMode.Normal -> {
+                        log("Signal strong again (${chooser.decidedAtDbm} dBm) - switching to normal range")
+                        requestMode(g, RadioMode.Normal)
+                    }
+                    null -> Unit
+                }
             }
 
             override fun onPhyRead(g: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
-                if (active) log("Radio mode: send=${phyName(txPhy)} receive=${phyName(rxPhy)}")
+                if (!active) return
+                log("Radio mode: send=${phyName(txPhy)} receive=${phyName(rxPhy)}")
+                onModeReported(rxPhy)
             }
 
             override fun onPhyUpdate(g: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
-                if (active) log("Radio mode now: send=${phyName(txPhy)} receive=${phyName(rxPhy)} (status $status)")
+                if (!active) return
+                log("Radio mode now: send=${phyName(txPhy)} receive=${phyName(rxPhy)} (status $status)")
+                onModeReported(rxPhy)
+            }
+        }
+
+        private fun requestMode(g: BluetoothGatt, mode: RadioMode) = when (mode) {
+            RadioMode.LongRange -> g.setPreferredPhy(
+                BluetoothDevice.PHY_LE_CODED_MASK,
+                BluetoothDevice.PHY_LE_CODED_MASK,
+                BluetoothDevice.PHY_OPTION_S8,
+            )
+            RadioMode.Normal -> g.setPreferredPhy(
+                BluetoothDevice.PHY_LE_1M_MASK,
+                BluetoothDevice.PHY_LE_1M_MASK,
+                BluetoothDevice.PHY_OPTION_NO_PREFERRED,
+            )
+        }
+
+        private fun onModeReported(rxPhy: Int) {
+            val chooser = chooser ?: return
+            val couldUseLongRange = chooser.longRangeAvailable
+            chooser.onModeReported(
+                if (rxPhy == BluetoothDevice.PHY_LE_CODED) RadioMode.LongRange else RadioMode.Normal,
+                SystemClock.elapsedRealtime(),
+            )
+            if (couldUseLongRange && !chooser.longRangeAvailable) {
+                log("The baby unit didn't take long range - staying on normal range")
             }
         }
 
@@ -650,6 +724,9 @@ class AndroidBleLink(context: Context) : PeerLink {
             _rssi.value = null
         }
     }
+
+    /** Which radio modes a run uses; see the class comment. */
+    private enum class RangeMode { NormalOnly, BySignal, LongRangeOnly }
 
     private companion object {
         const val TAG = "BabyCamBle"

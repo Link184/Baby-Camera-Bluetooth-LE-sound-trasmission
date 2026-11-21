@@ -76,7 +76,10 @@ class MonitorController(
     var session by mutableStateOf<Session?>(null)
         private set
 
-    /** Used by the next [start]; set on the link test screen. */
+    /**
+     * Keep the link on long range rather than switching by signal; used by the next [start], set on
+     * the link test screen.
+     */
     var longRange by mutableStateOf(false)
 
     private val rttByPeer = mutableStateMapOf<Int, Double>()
